@@ -1,0 +1,41 @@
+{{define "title"}}{{.Name}}{{end}}
+{{define "body"}}
+  <div class="shell">
+      <div class="hero">
+        <div class="eyebrow">Catalog detail</div>
+        <h1>{{.Name}}</h1>
+        <div class="lede">{{.Summary}}</div>
+        <div class="meta">
+          <span class="pill">Category: {{.CategoryName}}</span>
+          <span class="pill">Size: {{.SizeHuman}}</span>
+          <span class="pill">Seeders: {{.Seeders}}</span>
+          <span class="pill">Leechers: {{.Leechers}}</span>
+          <span class="pill">Added: {{.AddedHuman}}</span>
+        </div>
+        <div class="inline-actions" style="margin-top:12px;">
+          <a class="button-secondary" id="magnet" href="magnet:?xt=urn:btih:{{.InfoHash}}&dn={{urlquery .Name}}" target="_blank" rel="noopener noreferrer">Open magnet</a>
+          <button type="button" class="button-secondary" onclick="navigator.clipboard.writeText(document.getElementById('magnet').href)">Copy magnet</button>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="card section">
+          {{template "sectiontitle" "Description"}}
+          <div class="quote">{{.Description}}</div>
+        </div>
+        <div class="card section">
+          {{template "sectiontitle" "Details"}}
+          <div class="side-list compact">
+            <div class="kv"><span>User</span><span>{{.Username}}</span></div>
+            <div class="kv"><span>Info hash</span><span>{{.InfoHash}}</span></div>
+            <div class="kv"><span>Magnet</span><span class="magnet-link">{{.Name}}</span></div>
+            <div class="kv"><span>Language</span><span>{{.Language}}</span></div>
+            <div class="kv"><span>IMDB</span><span>{{.IMDB}}</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="card section files">
+        {{template "sectiontitle" "Files"}}
+        {{template "filetable" .}}
+      </div>
+    </div>
+{{end}}

@@ -1,0 +1,1316 @@
+package app
+
+import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"who-pirates-the-pirates/internal/catalog"
+	"who-pirates-the-pirates/internal/importer"
+	"who-pirates-the-pirates/internal/state"
+)
+
+type App struct {
+	catalog   *catalog.Catalog
+	state     *state.Store
+	adminPass string
+	secret    []byte
+}
+
+type AdminPageData struct {
+	state.AdminSettings
+	ImportSources   []state.ImportSource
+	ImportRuns      []state.ImportRun
+	ImportManifests []state.ImportManifest
+	AuditEntries    []state.AuditEntry
+}
+
+var templateDir = func() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return filepath.Join("internal", "app", "templates")
+	}
+	return filepath.Join(filepath.Dir(file), "templates")
+}()
+
+func New(dbPath, statePath string) (*App, error) {
+	db, err := catalog.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	st, err := state.Open(statePath)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	secret := []byte(os.Getenv("ADMIN_SESSION_SECRET"))
+	if len(secret) == 0 {
+		secret = make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			_ = db.Close()
+			_ = st.Close()
+			return nil, err
+		}
+	}
+
+	return &App{
+		catalog:   db,
+		state:     st,
+		adminPass: os.Getenv("ADMIN_PASSWORD"),
+		secret:    secret,
+	}, nil
+}
+
+func (a *App) Close() error {
+	if a == nil {
+		return nil
+	}
+	var errs []string
+	if a.catalog != nil {
+		if err := a.catalog.Close(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if a.state != nil {
+		if err := a.state.Close(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (a *App) Router() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", a.handleIndex)
+	mux.HandleFunc("/torrent/", a.handleTorrentPage)
+	mux.HandleFunc("/admin", a.handleAdminPage)
+	mux.HandleFunc("/healthz", a.handleHealthz)
+	mux.HandleFunc("/api/stats", a.handleStats)
+	mux.HandleFunc("/api/categories", a.handleCategories)
+	mux.HandleFunc("/api/search", a.handleSearch)
+	mux.HandleFunc("/api/torrents/", a.handleTorrentDetail)
+	mux.HandleFunc("/api/admin/login", a.handleAdminLogin)
+	mux.HandleFunc("/api/admin/logout", a.handleAdminLogout)
+	mux.HandleFunc("/api/admin/status", a.requireAdmin(a.handleAdminStatus))
+	mux.HandleFunc("/api/admin/audits", a.requireAdmin(a.handleAdminAudits))
+	mux.HandleFunc("/api/admin/audits/detail", a.requireAdmin(a.handleAdminAuditDetail))
+	mux.HandleFunc("/api/admin/audits/delete", a.requireAdmin(a.handleAdminDeleteAuditEntry))
+	mux.HandleFunc("/api/admin/audits/export", a.requireAdmin(a.handleAdminExportAudits))
+	mux.HandleFunc("/api/admin/import-manifests/list", a.requireAdmin(a.handleAdminImportManifestsList))
+	mux.HandleFunc("/api/admin/import-manifests/detail", a.requireAdmin(a.handleAdminImportManifestDetail))
+	mux.HandleFunc("/api/admin/import-manifests/delete", a.requireAdmin(a.handleAdminDeleteImportManifest))
+	mux.HandleFunc("/api/admin/import-manifests/export", a.requireAdmin(a.handleAdminExportImportManifests))
+	mux.HandleFunc("/api/admin/import-runs/list", a.requireAdmin(a.handleAdminImportRunsList))
+	mux.HandleFunc("/api/admin/import-runs/detail", a.requireAdmin(a.handleAdminImportRunDetail))
+	mux.HandleFunc("/api/admin/import-runs/export", a.requireAdmin(a.handleAdminExportImportRuns))
+	mux.HandleFunc("/api/admin/import-runs/delete", a.requireAdmin(a.handleAdminDeleteImportRun))
+	mux.HandleFunc("/api/admin/import-sources/list", a.requireAdmin(a.handleAdminImportSourcesList))
+	mux.HandleFunc("/api/admin/import-sources/detail", a.requireAdmin(a.handleAdminImportSourceDetail))
+	mux.HandleFunc("/api/admin/import-sources/export", a.requireAdmin(a.handleAdminExportImportSources))
+	mux.HandleFunc("/api/admin/import-sources", a.requireAdmin(a.handleAdminImportSources))
+	mux.HandleFunc("/api/admin/import-sources/toggle", a.requireAdmin(a.handleAdminToggleImportSource))
+	mux.HandleFunc("/api/admin/import-sources/update", a.requireAdmin(a.handleAdminUpdateImportSource))
+	mux.HandleFunc("/api/admin/import-sources/delete", a.requireAdmin(a.handleAdminDeleteImportSource))
+	mux.HandleFunc("/api/admin/import-runs", a.requireAdmin(a.handleAdminCreateImportRun))
+	mux.HandleFunc("/api/admin/import-runs/finish", a.requireAdmin(a.handleAdminFinishImportRun))
+	mux.HandleFunc("/api/admin/import-validate", a.requireAdmin(a.handleAdminValidateImportManifest))
+	mux.HandleFunc("/api/admin/import-manifest/preview", a.requireAdmin(a.handleAdminPreviewValidatedManifest))
+	mux.HandleFunc("/api/admin/import-manifest/record", a.requireAdmin(a.handleAdminRecordValidatedManifest))
+	mux.HandleFunc("/api/admin/tor", a.requireAdmin(a.handleAdminTorUpdate))
+	return mux
+}
+
+func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if err := a.renderPage(w, "index", "index.html", nil); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (a *App) handleTorrentPage(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimPrefix(r.URL.Path, "/torrent/")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	torrent, files, _, err := a.loadTorrentPageData(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.renderPage(w, "torrent", "torrent.html", map[string]any{
+		"Name":         torrent.Name,
+		"CategoryName": torrent.CategoryName,
+		"SizeHuman":    formatBytes(torrent.Size),
+		"Seeders":      torrent.Seeders,
+		"Leechers":     torrent.Leechers,
+		"AddedHuman":   formatUnix(torrent.Added),
+		"Description":  cleanText(deref(torrent.Description)),
+		"Summary":      summarizeText(cleanText(deref(torrent.Description)), 280),
+		"Username":     torrent.Username,
+		"InfoHash":     torrent.InfoHash,
+		"Language":     deref(torrent.Language),
+		"IMDB":         deref(torrent.IMDB),
+		"Files":        files,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		if err := a.renderPage(w, "admin_login", "admin_login.html", nil); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	s, _ := a.state.GetAdminSettings()
+	sources, _ := a.state.ImportSources()
+	runs, _ := a.state.ImportRuns(10)
+	manifests, _ := a.state.ImportManifests(10)
+	audits, _ := a.state.AuditEntries(10)
+	if err := a.renderPage(w, "admin", "admin.html", AdminPageData{AdminSettings: s, ImportSources: sources, ImportRuns: runs, ImportManifests: manifests, AuditEntries: audits}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func templatePath(name string) string {
+	return filepath.Join(templateDir, name)
+}
+
+func (a *App) renderPage(w http.ResponseWriter, name, page string, data any) error {
+	tpl, err := template.New(name).Funcs(template.FuncMap{
+		"dict":     dict,
+		"list":     list,
+		"urlquery": url.QueryEscape,
+	}).ParseFiles(templatePath(page))
+	if err != nil {
+		return err
+	}
+	tpl, err = tpl.ParseFiles(templatePath("base.html"))
+	if err != nil {
+		return err
+	}
+	return tpl.ExecuteTemplate(w, "base", data)
+}
+
+func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := a.catalog.Stats()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, stats)
+}
+
+func (a *App) handleCategories(w http.ResponseWriter, r *http.Request) {
+	items, err := a.catalog.Categories()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"items": items})
+}
+
+func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	category := strings.TrimSpace(r.URL.Query().Get("category"))
+	sortField := strings.TrimSpace(r.URL.Query().Get("sort"))
+	sortDir := strings.TrimSpace(r.URL.Query().Get("dir"))
+	limit := clampInt(queryInt(r, "limit", 100), 1, 100)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1000000)
+	items, err := a.catalog.Search(q, category, sortField, sortDir, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]any{"items": items, "limit": limit, "offset": offset, "query": q, "category": category, "sort": sortField, "dir": sortDir, "nextOffset": offset + len(items)})
+}
+
+func (a *App) handleTorrentDetail(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/torrents/")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	torrent, files, _, err := a.loadTorrentPageData(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]any{"torrent": torrent, "files": files})
+}
+
+func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.adminPass == "" {
+		http.Error(w, "admin password not configured", http.StatusForbidden)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if subtleConstantTime([]byte(r.FormValue("password")), []byte(a.adminPass)) == false {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	settings, err := a.state.GetAdminSettings()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	token, err := a.signSession("admin", settings.AdminSessionEpoch)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: 60 * 60 * 8})
+	_ = a.state.Audit("admin_login", "session established")
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, err := a.state.BumpAdminSessionEpoch(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("admin_logout", "session revoked")
+	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
+	s, err := a.state.GetAdminSettings()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	sources, err := a.state.ImportSources()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	sourceCount, err := a.state.ImportSourceTotals()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	catalogHealthy := a.catalog.Healthy() == nil
+	stateHealthy := a.state.Healthy() == nil
+	runs, err := a.state.ImportRuns(10)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	runCount, err := a.state.ImportRunTotals()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	manifests, err := a.state.ImportManifests(10)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	manifestCount, manifestBytes, err := a.state.ImportManifestTotals()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	audits, err := a.state.AuditEntries(10)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	var lastLoginAt any = nil
+	lastLogin, err := a.state.LatestAuditByAction("admin_login")
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if err == nil {
+		lastLoginAt = lastLogin.CreatedAt
+	}
+	var lastLogoutAt any = nil
+	lastLogout, err := a.state.LatestAuditByAction("admin_logout")
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if err == nil {
+		lastLogoutAt = lastLogout.CreatedAt
+	}
+	auditCount, err := a.state.AuditTotals()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"settings":                 s,
+		"adminSessionEpoch":        s.AdminSessionEpoch,
+		"catalogHealthy":           catalogHealthy,
+		"stateHealthy":             stateHealthy,
+		"importSources":            sources,
+		"importSourceCount":        sourceCount,
+		"importRuns":               runs,
+		"importRunCount":           runCount,
+		"importManifests":          manifests,
+		"importManifestCount":      len(manifests),
+		"importManifestTotalCount": manifestCount,
+		"importManifestTotalBytes": manifestBytes,
+		"auditCount":               auditCount,
+		"lastLoginAt":              lastLoginAt,
+		"lastLogoutAt":             lastLogoutAt,
+		"audits":                   audits,
+	})
+}
+
+func (a *App) handleAdminImportRunsList(w http.ResponseWriter, r *http.Request) {
+	limit := clampInt(queryInt(r, "limit", 25), 1, 100)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1_000_000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	runs, err := a.state.ImportRunsSearchOffset(q, limit+1, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hasMore := len(runs) > limit
+	if hasMore {
+		runs = runs[:limit]
+	}
+	writeJSON(w, map[string]any{
+		"items":   runs,
+		"limit":   limit,
+		"offset":  offset,
+		"q":       q,
+		"hasMore": hasMore,
+		"nextOffset": func() int {
+			if hasMore {
+				return offset + limit
+			}
+			return offset
+		}(),
+	})
+}
+
+func (a *App) handleAdminImportRunDetail(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.ImportRun(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"run": item})
+}
+
+func (a *App) handleAdminExportImportRuns(w http.ResponseWriter, r *http.Request) {
+	limit := clampInt(queryInt(r, "limit", 1000), 1, 1000)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1_000_000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	download := strings.TrimSpace(r.URL.Query().Get("download")) == "1"
+	runs, err := a.state.ImportRunsSearchOffset(q, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if download {
+		name := "import-runs.json"
+		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
+	}
+	_ = a.state.Audit("import_run_export", fmt.Sprintf("count=%d download=%t q=%s offset=%d limit=%d", len(runs), download, q, offset, limit))
+	writeJSON(w, map[string]any{
+		"items":    runs,
+		"q":        q,
+		"limit":    limit,
+		"offset":   offset,
+		"download": download,
+		"count":    len(runs),
+	})
+}
+
+func (a *App) handleAdminDeleteImportRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.ImportRun(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.state.DeleteImportRun(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_run_delete", fmt.Sprintf("id=%d status=%s", id, item.Status))
+	writeJSON(w, map[string]any{"deleted": true, "id": id})
+}
+
+func (a *App) handleAdminImportManifestsList(w http.ResponseWriter, r *http.Request) {
+	limit := clampInt(queryInt(r, "limit", 25), 1, 100)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1_000_000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	manifests, err := a.state.ImportManifestsSearchOffset(q, limit+1, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hasMore := len(manifests) > limit
+	if hasMore {
+		manifests = manifests[:limit]
+	}
+	writeJSON(w, map[string]any{
+		"items":   manifests,
+		"limit":   limit,
+		"offset":  offset,
+		"q":       q,
+		"hasMore": hasMore,
+		"nextOffset": func() int {
+			if hasMore {
+				return offset + limit
+			}
+			return offset
+		}(),
+	})
+}
+
+func (a *App) handleAdminImportManifestDetail(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.ImportManifest(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"manifest": item})
+}
+
+func (a *App) handleAdminDeleteImportManifest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.ImportManifest(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.state.DeleteImportManifest(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_manifest_delete", fmt.Sprintf("id=%d name=%s", id, item.Name))
+	writeJSON(w, map[string]any{"deleted": true, "id": id})
+}
+
+func (a *App) handleAdminExportImportManifests(w http.ResponseWriter, r *http.Request) {
+	limit := clampInt(queryInt(r, "limit", 1000), 1, 1000)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1_000_000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	download := strings.TrimSpace(r.URL.Query().Get("download")) == "1"
+	manifests, err := a.state.ImportManifestsSearchOffset(q, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var totalBytes int64
+	for _, item := range manifests {
+		totalBytes += item.TotalBytes
+	}
+	if download {
+		name := "import-manifests.json"
+		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
+	}
+	_ = a.state.Audit("import_manifest_export", fmt.Sprintf("count=%d total_bytes=%d download=%t q=%s offset=%d limit=%d", len(manifests), totalBytes, download, q, offset, limit))
+	writeJSON(w, map[string]any{
+		"items":      manifests,
+		"q":          q,
+		"limit":      limit,
+		"offset":     offset,
+		"download":   download,
+		"count":      len(manifests),
+		"totalBytes": totalBytes,
+	})
+}
+
+func (a *App) handleAdminAudits(w http.ResponseWriter, r *http.Request) {
+	limit := clampInt(queryInt(r, "limit", 25), 1, 100)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1_000_000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	audits, err := a.state.AuditEntriesSearchOffset(q, limit+1, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hasMore := len(audits) > limit
+	if hasMore {
+		audits = audits[:limit]
+	}
+	writeJSON(w, map[string]any{
+		"items":   audits,
+		"limit":   limit,
+		"offset":  offset,
+		"q":       q,
+		"hasMore": hasMore,
+		"nextLimit": func() int {
+			if hasMore {
+				return limit + limit
+			}
+			return limit
+		}(),
+		"nextOffset": func() int {
+			if hasMore {
+				return offset + limit
+			}
+			return offset
+		}(),
+	})
+}
+
+func (a *App) handleAdminAuditDetail(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.AuditEntry(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"audit": item})
+}
+
+func (a *App) handleAdminDeleteAuditEntry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.AuditEntry(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.state.DeleteAuditEntry(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("audit_delete", fmt.Sprintf("id=%d action=%s", id, item.Action))
+	writeJSON(w, map[string]any{"deleted": true, "id": id})
+}
+
+func (a *App) handleAdminExportAudits(w http.ResponseWriter, r *http.Request) {
+	limit := clampInt(queryInt(r, "limit", 1000), 1, 1000)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1_000_000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	download := strings.TrimSpace(r.URL.Query().Get("download")) == "1"
+	items, err := a.state.AuditEntriesSearchOffset(q, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if download {
+		name := "audits.json"
+		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
+	}
+	_ = a.state.Audit("audit_export", fmt.Sprintf("count=%d download=%t q=%s offset=%d limit=%d", len(items), download, q, offset, limit))
+	writeJSON(w, map[string]any{
+		"items":    items,
+		"q":        q,
+		"limit":    limit,
+		"offset":   offset,
+		"download": download,
+		"count":    len(items),
+	})
+}
+
+func (a *App) handleAdminImportSources(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		name := strings.TrimSpace(r.FormValue("name"))
+		kind := strings.TrimSpace(r.FormValue("kind"))
+		location := strings.TrimSpace(r.FormValue("location"))
+		if name == "" || kind == "" || location == "" {
+			http.Error(w, "missing required fields", http.StatusBadRequest)
+			return
+		}
+		enabled := r.FormValue("enabled") != ""
+		if err := a.state.CreateImportSource(name, kind, location, enabled); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = a.state.Audit("import_source_create", name+"|"+kind)
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	case http.MethodGet:
+		sources, err := a.state.ImportSources()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"items": sources})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *App) handleAdminImportSourcesList(w http.ResponseWriter, r *http.Request) {
+	limit := clampInt(queryInt(r, "limit", 25), 1, 100)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1_000_000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	sources, err := a.state.ImportSourcesSearchOffset(q, limit+1, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hasMore := len(sources) > limit
+	if hasMore {
+		sources = sources[:limit]
+	}
+	writeJSON(w, map[string]any{
+		"items":   sources,
+		"limit":   limit,
+		"offset":  offset,
+		"q":       q,
+		"hasMore": hasMore,
+		"nextOffset": func() int {
+			if hasMore {
+				return offset + limit
+			}
+			return offset
+		}(),
+	})
+}
+
+func (a *App) handleAdminImportSourceDetail(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.ImportSource(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"source": item})
+}
+
+func (a *App) handleAdminExportImportSources(w http.ResponseWriter, r *http.Request) {
+	limit := clampInt(queryInt(r, "limit", 1000), 1, 1000)
+	offset := clampInt(queryInt(r, "offset", 0), 0, 1_000_000)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	download := strings.TrimSpace(r.URL.Query().Get("download")) == "1"
+	sources, err := a.state.ImportSourcesSearchOffset(q, limit, offset)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if download {
+		name := "import-sources.json"
+		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
+	}
+	_ = a.state.Audit("import_source_export", fmt.Sprintf("count=%d download=%t q=%s offset=%d limit=%d", len(sources), download, q, offset, limit))
+	writeJSON(w, map[string]any{
+		"items":    sources,
+		"q":        q,
+		"limit":    limit,
+		"offset":   offset,
+		"download": download,
+		"count":    len(sources),
+	})
+}
+
+func (a *App) handleAdminToggleImportSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	enabled := r.FormValue("enabled") == "1"
+	if err := a.state.SetImportSourceEnabled(id, enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_source_toggle", fmt.Sprintf("id=%d enabled=%t", id, enabled))
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) handleAdminUpdateImportSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	kind := strings.TrimSpace(r.FormValue("kind"))
+	location := strings.TrimSpace(r.FormValue("location"))
+	if name == "" || kind == "" || location == "" {
+		http.Error(w, "missing required fields", http.StatusBadRequest)
+		return
+	}
+	if err := a.state.UpdateImportSource(id, name, kind, location); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_source_update", fmt.Sprintf("id=%d", id))
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) handleAdminDeleteImportSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.ImportSource(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.state.DeleteImportSource(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_source_delete", fmt.Sprintf("id=%d name=%s", id, item.Name))
+	writeJSON(w, map[string]any{"deleted": true, "id": id})
+}
+
+func (a *App) handleAdminCreateImportRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	sourceID, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("source_id")), 10, 64)
+	if err != nil || sourceID <= 0 {
+		http.Error(w, "invalid source id", http.StatusBadRequest)
+		return
+	}
+	status := strings.TrimSpace(r.FormValue("status"))
+	if status == "" {
+		status = "queued"
+	}
+	message := strings.TrimSpace(r.FormValue("message"))
+	checksum := strings.TrimSpace(r.FormValue("checksum"))
+	approvedRef := strings.TrimSpace(r.FormValue("approved_ref"))
+	if err := a.state.CreateImportRun(sourceID, status, message, checksum, approvedRef); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_run_create", fmt.Sprintf("source_id=%d status=%s", sourceID, status))
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) handleAdminFinishImportRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	status := strings.TrimSpace(r.FormValue("status"))
+	if status == "" {
+		status = "finished"
+	}
+	message := strings.TrimSpace(r.FormValue("message"))
+	if err := a.state.FinishImportRun(id, status, message); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_run_finish", fmt.Sprintf("id=%d status=%s", id, status))
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) handleAdminValidateImportManifest(w http.ResponseWriter, r *http.Request) {
+	result, approvedBy, err := a.validateManifestRequest(r)
+	if err != nil {
+		if errors.Is(err, errManifestRejected) {
+			_ = a.state.Audit("import_manifest_rejected", err.Error())
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = a.state.Audit("import_manifest_validated", fmt.Sprintf("%s|%s|%d", result.Name, approvedBy, result.TotalBytes))
+	writeJSON(w, map[string]any{
+		"manifest": map[string]any{
+			"name":            result.Name,
+			"approvedBy":      approvedBy,
+			"files":           result.Files,
+			"checksum":        result.Checksum,
+			"previewChecksum": result.PreviewChecksum,
+			"totalBytes":      result.TotalBytes,
+		},
+	})
+}
+
+func (a *App) handleAdminPreviewValidatedManifest(w http.ResponseWriter, r *http.Request) {
+	result, approvedBy, err := a.validateManifestRequest(r)
+	if err != nil {
+		if errors.Is(err, errManifestRejected) {
+			_ = a.state.Audit("import_manifest_rejected", err.Error())
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = a.state.Audit("import_manifest_preview", fmt.Sprintf("%s|%s|%d", result.Name, approvedBy, result.TotalBytes))
+	writeJSON(w, map[string]any{
+		"manifest": map[string]any{
+			"name":            result.Name,
+			"approvedBy":      approvedBy,
+			"files":           result.Files,
+			"checksum":        result.Checksum,
+			"previewChecksum": result.PreviewChecksum,
+			"totalBytes":      result.TotalBytes,
+		},
+	})
+}
+
+func (a *App) handleAdminRecordValidatedManifest(w http.ResponseWriter, r *http.Request) {
+	result, approvedBy, err := a.validateManifestRequest(r)
+	if err != nil {
+		if errors.Is(err, errManifestRejected) {
+			_ = a.state.Audit("import_manifest_rejected", err.Error())
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	sourceID, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("source_id")), 10, 64)
+	if err != nil || sourceID <= 0 {
+		http.Error(w, "invalid source id", http.StatusBadRequest)
+		return
+	}
+	runStatus := strings.TrimSpace(r.FormValue("status"))
+	if runStatus == "" {
+		runStatus = "queued"
+	}
+	message := strings.TrimSpace(r.FormValue("message"))
+	if message == "" {
+		message = "validated manifest recorded from admin"
+	}
+	approvedRef := strings.TrimSpace(r.FormValue("approved_ref"))
+	if approvedRef == "" {
+		approvedRef = result.Name
+	}
+	if err := a.state.CreateImportRun(sourceID, runStatus, message, result.PreviewChecksum, approvedRef); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.state.CreateImportManifest(result.Name, approvedBy, strings.TrimSpace(r.FormValue("base_dir")), result.Checksum, result.PreviewChecksum, result.TotalBytes); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_manifest_recorded", fmt.Sprintf("source_id=%d name=%s", sourceID, result.Name))
+	writeJSON(w, map[string]any{
+		"manifest": map[string]any{
+			"name":            result.Name,
+			"approvedBy":      approvedBy,
+			"files":           result.Files,
+			"checksum":        result.Checksum,
+			"previewChecksum": result.PreviewChecksum,
+			"totalBytes":      result.TotalBytes,
+		},
+		"run": map[string]any{
+			"sourceId":    sourceID,
+			"status":      runStatus,
+			"message":     message,
+			"approvedRef": approvedRef,
+		},
+		"stored": map[string]any{
+			"name":            result.Name,
+			"approvedBy":      approvedBy,
+			"baseDir":         strings.TrimSpace(r.FormValue("base_dir")),
+			"checksum":        result.Checksum,
+			"previewChecksum": result.PreviewChecksum,
+			"totalBytes":      result.TotalBytes,
+		},
+	})
+}
+
+var errManifestRejected = errors.New("manifest rejected")
+
+func (a *App) validateManifestRequest(r *http.Request) (importer.ValidationResult, string, error) {
+	if r.Method != http.MethodPost {
+		return importer.ValidationResult{}, "", fmt.Errorf("method not allowed")
+	}
+	if err := r.ParseForm(); err != nil {
+		return importer.ValidationResult{}, "", fmt.Errorf("invalid form")
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	approvedBy := strings.TrimSpace(r.FormValue("approved_by"))
+	checksum := strings.TrimSpace(r.FormValue("checksum"))
+	baseDir := strings.TrimSpace(r.FormValue("base_dir"))
+	files := splitLines(r.FormValue("files"))
+	if name == "" || len(files) == 0 {
+		return importer.ValidationResult{}, "", errManifestRejected
+	}
+	result, err := importer.ValidateManifest(importer.Manifest{
+		Name:       name,
+		ApprovedBy: approvedBy,
+		Checksum:   checksum,
+		Files:      files,
+	}, baseDir)
+	if err != nil {
+		return importer.ValidationResult{}, "", errManifestRejected
+	}
+	return result, approvedBy, nil
+}
+
+func (a *App) handleAdminTorUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	settings, err := a.state.GetAdminSettings()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	settings.TorEnabled = r.FormValue("tor_enabled") == "1"
+	settings.TorMode = strings.TrimSpace(r.FormValue("tor_mode"))
+	settings.TorAutostart = r.FormValue("tor_autostart") == "1"
+	settings.OnionAddress = strings.TrimSpace(r.FormValue("onion_address"))
+	settings.TorControlAddr = strings.TrimSpace(r.FormValue("tor_control_addr"))
+	settings.TorStatus = "configured"
+	if settings.TorMode == "" {
+		settings.TorMode = "off"
+	}
+	if err := a.state.PutAdminSettings(settings); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	_ = a.state.Audit("tor_update", "settings updated")
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) loadTorrentPageData(id int64) (catalog.Torrent, []catalog.TorrentFile, string, error) {
+	t, categoryName, err := a.catalog.Torrent(id)
+	if err != nil {
+		return catalog.Torrent{}, nil, "", err
+	}
+	files, err := a.catalog.TorrentFiles(id, 500)
+	if err != nil {
+		return t, nil, categoryName, err
+	}
+	return t, files, categoryName, nil
+}
+
+func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !a.isAdmin(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (a *App) isAdmin(r *http.Request) bool {
+	c, err := r.Cookie("admin_session")
+	if err != nil || c.Value == "" {
+		return false
+	}
+	parts := strings.Split(c.Value, ".")
+	if len(parts) != 2 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	mac, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	fields := strings.Split(string(payload), ":")
+	if len(fields) != 3 || fields[0] != "admin" {
+		return false
+	}
+	epoch, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return false
+	}
+	settings, err := a.state.GetAdminSettings()
+	if err != nil || settings.AdminSessionEpoch != epoch {
+		return false
+	}
+	sum := hmac.New(sha256.New, a.secret)
+	sum.Write(payload)
+	return hmac.Equal(mac, sum.Sum(nil))
+}
+
+func (a *App) signSession(subject string, epoch ...int64) (string, error) {
+	currentEpoch := int64(0)
+	if len(epoch) > 0 {
+		currentEpoch = epoch[0]
+	}
+	payload := []byte(subject + ":" + strconv.FormatInt(currentEpoch, 10) + ":" + strconv.FormatInt(time.Now().Unix(), 10))
+	sum := hmac.New(sha256.New, a.secret)
+	sum.Write(payload)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(sum.Sum(nil)), nil
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
+func queryInt(r *http.Request, key string, def int) int {
+	if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func clampInt(n, min, max int) int {
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
+func formatBytes(n float64) string {
+	switch {
+	case n >= 1024*1024*1024:
+		return fmt.Sprintf("%.2f GB", n/1024/1024/1024)
+	case n >= 1024*1024:
+		return fmt.Sprintf("%.2f MB", n/1024/1024)
+	case n >= 1024:
+		return fmt.Sprintf("%.2f KB", n/1024)
+	default:
+		return fmt.Sprintf("%.0f B", n)
+	}
+}
+
+func formatUnix(ts int64) string {
+	return time.Unix(ts, 0).UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
+func cleanText(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return s
+}
+
+func splitLines(s string) []string {
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func summarizeText(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "No description provided."
+	}
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit]) + "..."
+}
+
+func deref(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func dict(values ...any) map[string]any {
+	m := make(map[string]any, len(values)/2)
+	for i := 0; i+1 < len(values); i += 2 {
+		key, _ := values[i].(string)
+		m[key] = values[i+1]
+	}
+	return m
+}
+
+func list(values ...any) []any {
+	return values
+}
+
+func subtleConstantTime(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var diff byte
+	for i := range a {
+		diff |= a[i] ^ b[i]
+	}
+	return diff == 0
+}

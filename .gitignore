@@ -1,0 +1,7 @@
+.DS_Store
+internal/.DS_Store
+bin/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.7z

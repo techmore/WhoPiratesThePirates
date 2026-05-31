@@ -1,0 +1,11 @@
+{{define "title"}}Admin Login{{end}}
+{{define "body"}}
+<div class="auth-shell">
+  <form class="card auth-card" method="post" action="/api/admin/login">
+    {{template "panelhead" (dict "Eyebrow" "Admin Surface" "Title" "Sign in" "Subtitle" "Use the configured admin password to manage operational settings. Catalog data remains read-only.")}}
+    <input name="password" type="password" placeholder="Admin password" autocomplete="current-password" class="field">
+    <button type="submit" class="button-primary">Login</button>
+    <div class="muted note">Session access is scoped to this device and stored as a signed cookie.</div>
+  </form>
+</div>
+{{end}}

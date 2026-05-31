@@ -1,0 +1,166 @@
+{{define "title"}}Torrent Catalog{{end}}
+{{define "body"}}
+    {{template "topbar" (dict "Eyebrow" "SQLite catalog browser" "Chips" (list "Read-only catalog" "Go backend" "Separate app state") "ActionHref" "/admin" "ActionLabel" "Admin")}}
+    <div class="card search">
+      <input id="q" placeholder="Search titles, descriptions, hashes..." onkeydown="handleSearchKey(event)" />
+      <select id="sort" aria-label="Sort order">
+        <option value="hot">Curated</option>
+        <option value="newest">Newest</option>
+        <option value="seeders">Seeders</option>
+      </select>
+      <select id="limit" aria-label="Results per page">
+        <option value="50">50 / page</option>
+        <option value="100" selected>100 / page</option>
+        <option value="25">25 / page</option>
+      </select>
+      <button onclick="search(0)">Search</button>
+    </div>
+
+    <div class="filters" id="categories"></div>
+    <div class="stats" id="stats"></div>
+    <div id="view-status" class="view-status">
+      <span class="tag">Browse</span>
+      <span id="view-status-text" class="muted">Showing the catalog.</span>
+    </div>
+    <div class="card results">
+      <div class="panel-head" style="padding:14px 14px 0;">
+        <div>
+          <div class="muted section-eyebrow">Catalog overview</div>
+          <h2 class="section-title section-title-small">Torrents, files, categories, and related records</h2>
+        </div>
+      </div>
+      <table class="dense-table compact">
+        <thead>
+          <tr>
+            <th><button type="button" class="header-sort" data-sort-field="name" onclick="sortBy('name', 'Name')">Name</button></th>
+            <th><button type="button" class="header-sort" data-sort-field="category" onclick="sortBy('category', 'Category')">Category</button></th>
+            <th><button type="button" class="header-sort" data-sort-field="size" onclick="sortBy('size', 'Size')">Size</button></th>
+            <th><button type="button" class="header-sort" data-sort-field="seeders" onclick="sortBy('seeders', 'Seeders')">Seeders</button></th>
+            <th><button type="button" class="header-sort" data-sort-field="leechers" onclick="sortBy('leechers', 'Leechers')">Leechers</button></th>
+            <th><button type="button" class="header-sort" data-sort-field="added" onclick="sortBy('added', 'Added')">Added</button></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="pager">
+        <div id="pageinfo" class="muted"></div>
+        <div class="page-nav">
+          <button class="secondary" onclick="prevPage()">Previous</button>
+          <button class="secondary" onclick="nextPage()">Next</button>
+        </div>
+      </div>
+    </div>
+  <script>
+    let currentOffset = 0;
+    let currentLimit = 100;
+    let currentCategory = '';
+    let currentSort = 'seeders';
+    let currentDir = 'desc';
+    let currentSortLabel = 'Seeders';
+    async function loadStats() {
+      const stats = await fetch('/api/stats').then(r => r.json());
+      const order = ['torrents', 'files', 'categories', 'yts_movies', 'yts_torrent_data'];
+      const labels = {
+        torrents: 'Torrents',
+        files: 'Files',
+        categories: 'Categories',
+        yts_movies: 'Movies',
+        yts_torrent_data: 'Torrent Data',
+      };
+      document.getElementById('stats').innerHTML = order.filter(k => k in stats).map(k => '<div class="card stat"><div class="k">' + labels[k] + '</div><div class="v">' + stats[k].toLocaleString() + '</div></div>').join('');
+    }
+    async function loadCategories() {
+      const data = await fetch('/api/categories').then(r => r.json());
+      const html = ['<div class="pill active" data-cat="" onclick="setCategory(\'\')">All</div>'].concat(
+        data.items.map(cat => '<div class="pill" data-cat="' + cat.id + '" onclick="setCategory(\'' + cat.id + '\')">' + escapeHtml(cat.name || ('Category ' + cat.id)) + '</div>')
+      ).join('');
+      document.getElementById('categories').innerHTML = html;
+    }
+    function setCategory(category) {
+      currentCategory = category;
+      document.querySelectorAll('.pill').forEach(el => el.classList.toggle('active', el.dataset.cat === String(category)));
+      updateViewStatus();
+      search(0);
+    }
+    function updateViewStatus(text) {
+      const status = document.getElementById('view-status-text');
+      if (!status) return;
+      if (text) {
+        status.textContent = text;
+        return;
+      }
+      const parts = [];
+      const q = document.getElementById('q').value.trim();
+      if (q) parts.push('Searching for "' + q + '"');
+      if (currentCategory) {
+        const pill = document.querySelector('.pill[data-cat="' + CSS.escape(String(currentCategory)) + '"]');
+        parts.push('Category ' + (pill ? pill.textContent.trim() : currentCategory));
+      }
+      parts.push('Sorted by ' + currentSortLabel + ' ' + (currentDir === 'desc' ? 'descending' : 'ascending'));
+      parts.push('Showing ' + currentLimit + ' per page');
+      status.textContent = parts.join(' · ');
+    }
+    async function search(offset) {
+      const q = document.getElementById('q').value || '';
+      currentSort = document.getElementById('sort').value || 'seeders';
+      currentLimit = parseInt(document.getElementById('limit').value || '100', 10);
+      currentOffset = offset || 0;
+      updateViewStatus('Searching...');
+      const results = document.querySelector('.results');
+      results.classList.add('loading');
+      document.getElementById('rows').innerHTML = '<tr><td colspan="7" class="results-empty">Searching...</td></tr>';
+      document.getElementById('pageinfo').textContent = 'Searching...';
+      results.classList.remove('empty');
+      const params = new URLSearchParams({ q, limit: String(currentLimit), offset: String(currentOffset) });
+      if (currentCategory) params.set('category', currentCategory);
+      params.set('sort', currentSort);
+      params.set('dir', currentDir);
+      try {
+        const res = await fetch('/api/search?' + params.toString());
+        const data = await res.json();
+        document.getElementById('rows').innerHTML = data.items.map(item => '<tr><td><a href="/torrent/' + item.id + '">' + escapeHtml(item.name) + '</a><div class="muted">' + escapeHtml(item.username || '') + '</div></td><td>' + escapeHtml(item.categoryName || String(item.category)) + '</td><td>' + formatSize(item.size) + '</td><td>' + item.seeders + '</td><td>' + item.leechers + '</td><td>' + new Date(item.added * 1000).toLocaleString() + '</td><td><button type="button" class="secondary" onclick="window.location.href=\'/torrent/' + item.id + '#magnet\'">Magnet</button></td></tr>').join('');
+        document.getElementById('pageinfo').textContent = data.items.length ? ('Showing ' + (data.offset + 1) + ' - ' + (data.offset + data.items.length) + (currentCategory ? ' in category ' + currentCategory : '') + ' · sorted by ' + currentSortLabel + ' ' + (currentDir === 'desc' ? 'descending' : 'ascending')) : 'No results';
+        results.classList.toggle('empty', data.items.length === 0);
+        updateViewStatus();
+      } catch (error) {
+        document.getElementById('rows').innerHTML = '<tr><td colspan="7" class="results-empty">Search failed. Try again.</td></tr>';
+        document.getElementById('pageinfo').textContent = 'Search failed';
+        results.classList.add('empty');
+        updateViewStatus('Search failed');
+      } finally {
+        results.classList.remove('loading');
+        updateHeaderSortState();
+      }
+    }
+    function handleSearchKey(event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        search(0);
+      }
+    }
+    function nextPage() { search(currentOffset + currentLimit); }
+    function prevPage() { search(Math.max(0, currentOffset - currentLimit)); }
+    function sortBy(field, label) {
+      if (currentSort === field) {
+        currentDir = currentDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        currentSort = field;
+        currentDir = field === 'name' || field === 'category' ? 'asc' : 'desc';
+      }
+      currentSortLabel = label;
+      updateViewStatus();
+      search(0);
+    }
+    function updateHeaderSortState() {
+      document.querySelectorAll('[data-sort-field]').forEach(el => {
+        const active = el.dataset.sortField === currentSort;
+        el.classList.toggle('active', active);
+        el.setAttribute('aria-sort', active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none');
+      });
+    }
+    function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    function formatSize(size) { return size >= 1024*1024*1024 ? (size/1024/1024/1024).toFixed(2) + ' GB' : size >= 1024*1024 ? (size/1024/1024).toFixed(2) + ' MB' : (size/1024).toFixed(2) + ' KB'; }
+    loadStats(); loadCategories(); updateHeaderSortState(); search(0);
+  </script>
+{{end}}

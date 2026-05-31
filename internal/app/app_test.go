@@ -1,0 +1,2015 @@
+package app
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+
+	_ "modernc.org/sqlite"
+)
+
+const (
+	testAdminPassword      = "secret"
+	testAdminSessionSecret = "01234567890123456789012345678901"
+)
+
+func TestAdminManifestRecordFlow(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(baseDir, "data.txt"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"source_id":    []string{"1"},
+		"name":         []string{"Approved dataset"},
+		"approved_by":  []string{"owner"},
+		"checksum":     []string{""},
+		"base_dir":     []string{baseDir},
+		"files":        []string{"data.txt"},
+		"approved_ref": []string{"ref/approved"},
+		"message":      []string{"validated"},
+		"status":       []string{"queued"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-manifest/record", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	seedState(t, statePath)
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Manifest struct {
+			Name            string   `json:"name"`
+			ApprovedBy      string   `json:"approvedBy"`
+			Files           []string `json:"files"`
+			PreviewChecksum string   `json:"previewChecksum"`
+		} `json:"manifest"`
+		Run struct {
+			SourceID    int64  `json:"sourceId"`
+			Status      string `json:"status"`
+			Message     string `json:"message"`
+			ApprovedRef string `json:"approvedRef"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Manifest.Name != "Approved dataset" || payload.Run.Status != "queued" || payload.Run.ApprovedRef != "ref/approved" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	if payload.Manifest.PreviewChecksum == "" {
+		t.Fatal("expected preview checksum in response")
+	}
+
+	sources, err := a.state.ImportRuns(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 {
+		t.Fatalf("expected one import run, got %#v", sources)
+	}
+	if sources[0].ApprovedRef != "ref/approved" || sources[0].Status != "queued" {
+		t.Fatalf("unexpected run: %#v", sources[0])
+	}
+
+	manifests, err := a.state.ImportManifests(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifests) != 1 {
+		t.Fatalf("expected one stored manifest, got %#v", manifests)
+	}
+	if manifests[0].Name != "Approved dataset" || manifests[0].ApprovedBy != "owner" || manifests[0].PreviewChecksum != payload.Manifest.PreviewChecksum {
+		t.Fatalf("unexpected manifest record: %#v", manifests[0])
+	}
+}
+
+func TestAdminLoginAndLogoutFlow(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookie := loginAsAdmin(t, a)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected protected endpoint after login, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	loginAudits, err := a.state.AuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loginAudits) == 0 || loginAudits[0].Action != "admin_login" {
+		t.Fatalf("expected login audit entry, got %#v", loginAudits)
+	}
+
+	torForm := url.Values{
+		"tor_enabled":      []string{"1"},
+		"tor_mode":         []string{"dual"},
+		"tor_autostart":    []string{"1"},
+		"onion_address":    []string{"example.onion"},
+		"tor_control_addr": []string{"127.0.0.1:9051"},
+	}
+	torReq := httptest.NewRequest(http.MethodPost, "/api/admin/tor", strings.NewReader(torForm.Encode()))
+	torReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	torReq.AddCookie(cookie)
+	torRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(torRec, torReq)
+	if torRec.Code != http.StatusSeeOther {
+		t.Fatalf("unexpected tor update code: %d body=%s", torRec.Code, torRec.Body.String())
+	}
+
+	postTorReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	postTorReq.AddCookie(cookie)
+	postTorRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(postTorRec, postTorReq)
+	if postTorRec.Code != http.StatusOK {
+		t.Fatalf("expected session to survive tor update, got %d body=%s", postTorRec.Code, postTorRec.Body.String())
+	}
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/admin/logout", nil)
+	logoutReq.AddCookie(cookie)
+	logoutRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusSeeOther {
+		t.Fatalf("unexpected logout code: %d body=%s", logoutRec.Code, logoutRec.Body.String())
+	}
+	if got := logoutRec.Header().Get("Set-Cookie"); !strings.Contains(got, "admin_session=") || !strings.Contains(got, "Path=/") {
+		t.Fatalf("expected session clearing cookie, got %q", got)
+	}
+	audits, err := a.state.AuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) == 0 || audits[0].Action != "admin_logout" {
+		t.Fatalf("expected logout audit entry, got %#v", audits)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	statusReq.AddCookie(cookie)
+	statusRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected revoked cookie to be rejected, got %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	freshCookie, err := a.signSession("admin", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusReq = httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	statusReq.AddCookie(&http.Cookie{Name: "admin_session", Value: freshCookie})
+	statusRec = httptest.NewRecorder()
+	a.Router().ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("expected fresh cookie to work, got %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var statusPayload struct {
+		LastLoginAt  any `json:"lastLoginAt"`
+		LastLogoutAt any `json:"lastLogoutAt"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusPayload); err != nil {
+		t.Fatal(err)
+	}
+	if statusPayload.LastLoginAt == nil {
+		t.Fatalf("expected lastLoginAt in status payload, got %#v", statusPayload)
+	}
+	if statusPayload.LastLogoutAt == nil {
+		t.Fatalf("expected lastLogoutAt in status payload, got %#v", statusPayload)
+	}
+
+	secondCookie := loginAsAdmin(t, a)
+	secondLogoutReq := httptest.NewRequest(http.MethodPost, "/api/admin/logout", nil)
+	secondLogoutReq.AddCookie(secondCookie)
+	secondLogoutRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(secondLogoutRec, secondLogoutReq)
+	if secondLogoutRec.Code != http.StatusSeeOther {
+		t.Fatalf("unexpected second logout code: %d body=%s", secondLogoutRec.Code, secondLogoutRec.Body.String())
+	}
+	freshStatusReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	freshStatusReq.AddCookie(secondCookie)
+	freshStatusRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(freshStatusRec, freshStatusReq)
+	if freshStatusRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected second revoked cookie to be rejected, got %d body=%s", freshStatusRec.Code, freshStatusRec.Body.String())
+	}
+	bumpedFreshCookie, err := a.signSession("admin", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshStatusReq = httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	freshStatusReq.AddCookie(&http.Cookie{Name: "admin_session", Value: bumpedFreshCookie})
+	freshStatusRec = httptest.NewRecorder()
+	a.Router().ServeHTTP(freshStatusRec, freshStatusReq)
+	if freshStatusRec.Code != http.StatusOK {
+		t.Fatalf("expected refreshed cookie after second logout, got %d body=%s", freshStatusRec.Code, freshStatusRec.Body.String())
+	}
+	var refreshedStatusPayload struct {
+		LastLoginAt  any `json:"lastLoginAt"`
+		LastLogoutAt any `json:"lastLogoutAt"`
+	}
+	if err := json.Unmarshal(freshStatusRec.Body.Bytes(), &refreshedStatusPayload); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedStatusPayload.LastLoginAt == nil {
+		t.Fatalf("expected lastLoginAt after second login, got %#v", refreshedStatusPayload)
+	}
+	if refreshedStatusPayload.LastLogoutAt == nil {
+		t.Fatalf("expected lastLogoutAt after second logout, got %#v", refreshedStatusPayload)
+	}
+
+	postLogoutReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	postLogoutReq.AddCookie(cookie)
+	postLogoutRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(postLogoutRec, postLogoutReq)
+	if postLogoutRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected logout to revoke access, got %d body=%s", postLogoutRec.Code, postLogoutRec.Body.String())
+	}
+}
+
+func TestAdminTorUpdatePreservesSessionEpoch(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	if _, err := a.state.BumpAdminSessionEpoch(); err != nil {
+		t.Fatal(err)
+	}
+	sessionBefore, err := a.state.GetAdminSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cookieVal, err := a.signSession("admin", sessionBefore.AdminSessionEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"tor_enabled":      []string{"1"},
+		"tor_mode":         []string{"dual"},
+		"tor_autostart":    []string{"1"},
+		"onion_address":    []string{"example.onion"},
+		"tor_control_addr": []string{"127.0.0.1:9051"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/tor", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	after, err := a.state.GetAdminSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.AdminSessionEpoch != sessionBefore.AdminSessionEpoch {
+		t.Fatalf("expected tor update to preserve epoch, before=%d after=%d", sessionBefore.AdminSessionEpoch, after.AdminSessionEpoch)
+	}
+}
+
+func TestAdminLogoutRejectsGet(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/logout", nil)
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminLogoutRevocationSurvivesRestart(t *testing.T) {
+	a, catalogPath, statePath := newTestApp(t, testAdminPassword)
+
+	cookie := loginAsAdmin(t, a)
+
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/admin/logout", nil)
+	logoutReq.AddCookie(cookie)
+	logoutRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusSeeOther {
+		t.Fatalf("unexpected logout code: %d body=%s", logoutRec.Code, logoutRec.Body.String())
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a2, err := New(catalogPath, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a2.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	a2.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected revoked cookie after restart, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	reloginCookie := loginAsAdmin(t, a2)
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	statusReq.AddCookie(reloginCookie)
+	statusRec := httptest.NewRecorder()
+	a2.Router().ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("expected status after restart relogin, got %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var statusPayload struct {
+		LastLoginAt  any `json:"lastLoginAt"`
+		LastLogoutAt any `json:"lastLogoutAt"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusPayload); err != nil {
+		t.Fatal(err)
+	}
+	if statusPayload.LastLoginAt == nil {
+		t.Fatalf("expected lastLoginAt after restart relogin, got %#v", statusPayload)
+	}
+	if statusPayload.LastLogoutAt == nil {
+		t.Fatalf("expected lastLogoutAt after restart relogin, got %#v", statusPayload)
+	}
+}
+
+func loginAsAdmin(t *testing.T, a *App) *http.Cookie {
+	t.Helper()
+
+	loginForm := url.Values{"password": []string{testAdminPassword}}
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(loginForm.Encode()))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusSeeOther {
+		t.Fatalf("unexpected login code: %d body=%s", loginRec.Code, loginRec.Body.String())
+	}
+	cookies := loginRec.Result().Cookies()
+	if len(cookies) == 0 || cookies[0].Name != "admin_session" || cookies[0].Value == "" {
+		t.Fatalf("expected admin session cookie, got %#v", cookies)
+	}
+	return cookies[0]
+}
+
+func TestAdminLoginRejectsBadRequests(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	tests := []struct {
+		name   string
+		method string
+		body   string
+		want   int
+	}{
+		{name: "method", method: http.MethodGet, want: http.StatusMethodNotAllowed},
+		{name: "bad password", method: http.MethodPost, body: "password=nope", want: http.StatusUnauthorized},
+		{name: "invalid form", method: http.MethodPost, body: "%", want: http.StatusBadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/api/admin/login", strings.NewReader(tc.body))
+			if tc.method == http.MethodPost {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			rec := httptest.NewRecorder()
+
+			a.Router().ServeHTTP(rec, req)
+
+			if rec.Code != tc.want {
+				t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+}
+
+func TestAdminLoginFailsWithoutConfiguredPassword(t *testing.T) {
+	a, _ := newAdminTestApp(t, "")
+	defer a.Close()
+
+	form := url.Values{"password": []string{testAdminPassword}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminImportManifestsListEndpointReturnsItems(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportManifest("Alpha manifest", "owner", "/tmp", "abc", "abc", 123); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportManifest("Beta manifest", "owner", "/tmp", "def", "def", 456); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-manifests/list?limit=1&offset=0", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+		Limit      int  `json:"limit"`
+		Offset     int  `json:"offset"`
+		HasMore    bool `json:"hasMore"`
+		NextOffset int  `json:"nextOffset"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Limit != 1 || payload.Offset != 0 || !payload.HasMore || payload.NextOffset != 1 || len(payload.Items) != 1 || payload.Items[0].Name != "Beta manifest" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminImportManifestsListEndpointFiltersQuery(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportManifest("Alpha manifest", "owner", "/tmp", "abc", "abc", 123); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportManifest("Beta manifest", "owner", "/tmp", "def", "def", 456); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-manifests/list?limit=10&offset=0&q=alp", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Name != "Alpha manifest" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminImportManifestDetailEndpointReturnsItem(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportManifest("Alpha manifest", "owner", "/tmp", "abc", "abc", 123); err != nil {
+		t.Fatal(err)
+	}
+	manifests, err := a.state.ImportManifests(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-manifests/detail?id="+strconv.FormatInt(manifests[0].ID, 10), nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Manifest struct {
+			ID      int64  `json:"id"`
+			Name    string `json:"name"`
+			BaseDir string `json:"baseDir"`
+		} `json:"manifest"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Manifest.ID != manifests[0].ID || payload.Manifest.Name != "Alpha manifest" || payload.Manifest.BaseDir != "/tmp" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminDeleteImportManifestEndpointDeletesItem(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportManifest("Alpha manifest", "owner", "/tmp", "abc", "abc", 123); err != nil {
+		t.Fatal(err)
+	}
+	manifests, err := a.state.ImportManifests(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"id": []string{strconv.FormatInt(manifests[0].ID, 10)}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-manifests/delete", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Deleted bool  `json:"deleted"`
+		ID      int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Deleted || payload.ID != manifests[0].ID {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	if _, err := a.state.ImportManifest(manifests[0].ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected deleted manifest to be missing, got %v", err)
+	}
+}
+
+func TestAdminDeleteEndpointsRejectBadRequests(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name   string
+		method string
+		target string
+		body   string
+		want   int
+	}{
+		{name: "source method", method: http.MethodGet, target: "/api/admin/import-sources/delete", want: http.StatusMethodNotAllowed},
+		{name: "source id", method: http.MethodPost, target: "/api/admin/import-sources/delete", body: "id=bad", want: http.StatusBadRequest},
+		{name: "run method", method: http.MethodGet, target: "/api/admin/import-runs/delete", want: http.StatusMethodNotAllowed},
+		{name: "run id", method: http.MethodPost, target: "/api/admin/import-runs/delete", body: "id=bad", want: http.StatusBadRequest},
+		{name: "audit method", method: http.MethodGet, target: "/api/admin/audits/delete", want: http.StatusMethodNotAllowed},
+		{name: "audit id", method: http.MethodPost, target: "/api/admin/audits/delete", body: "id=bad", want: http.StatusBadRequest},
+		{name: "manifest method", method: http.MethodGet, target: "/api/admin/import-manifests/delete", want: http.StatusMethodNotAllowed},
+		{name: "manifest id", method: http.MethodPost, target: "/api/admin/import-manifests/delete", body: "id=bad", want: http.StatusBadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			if tc.method == http.MethodPost {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+			rec := httptest.NewRecorder()
+
+			a.Router().ServeHTTP(rec, req)
+
+			if rec.Code != tc.want {
+				t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminDeleteEndpointsRequireAuth(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	tests := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{name: "source", method: http.MethodPost, target: "/api/admin/import-sources/delete"},
+		{name: "run", method: http.MethodPost, target: "/api/admin/import-runs/delete"},
+		{name: "audit", method: http.MethodPost, target: "/api/admin/audits/delete"},
+		{name: "manifest", method: http.MethodPost, target: "/api/admin/import-manifests/delete"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader("id=1"))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+
+			a.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+}
+
+func TestAdminEndpointsRequireAuth(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	tests := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{name: "status", method: http.MethodGet, target: "/api/admin/status"},
+		{name: "audits", method: http.MethodGet, target: "/api/admin/audits"},
+		{name: "audit detail", method: http.MethodGet, target: "/api/admin/audits/detail?id=1"},
+		{name: "runs list", method: http.MethodGet, target: "/api/admin/import-runs/list"},
+		{name: "runs detail", method: http.MethodGet, target: "/api/admin/import-runs/detail?id=1"},
+		{name: "sources list", method: http.MethodGet, target: "/api/admin/import-sources/list"},
+		{name: "sources detail", method: http.MethodGet, target: "/api/admin/import-sources/detail?id=1"},
+		{name: "manifests list", method: http.MethodGet, target: "/api/admin/import-manifests/list"},
+		{name: "manifests detail", method: http.MethodGet, target: "/api/admin/import-manifests/detail?id=1"},
+		{name: "manifest preview", method: http.MethodPost, target: "/api/admin/import-manifest/preview"},
+		{name: "manifest record", method: http.MethodPost, target: "/api/admin/import-manifest/record"},
+		{name: "tor update", method: http.MethodPost, target: "/api/admin/tor"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, nil)
+			rec := httptest.NewRecorder()
+
+			a.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminEndpointsRejectBadSessionCookie(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	tests := []struct {
+		name   string
+		method string
+		target string
+	}{
+		{name: "status", method: http.MethodGet, target: "/api/admin/status"},
+		{name: "audits", method: http.MethodGet, target: "/api/admin/audits"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, nil)
+			req.AddCookie(&http.Cookie{Name: "admin_session", Value: "bogus"})
+			rec := httptest.NewRecorder()
+
+			a.Router().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminImportRunDetailEndpointReturnsItem(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Feed", "http", "https://example.com", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportRun(1, "queued", "created for test", "abc123", "approved/ref"); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := a.state.ImportRuns(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-runs/detail?id="+strconv.FormatInt(runs[0].ID, 10), nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Run struct {
+			ID       int64  `json:"id"`
+			Status   string `json:"status"`
+			SourceID int64  `json:"sourceId"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Run.ID != runs[0].ID || payload.Run.Status != "queued" || payload.Run.SourceID != 1 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminExportImportManifestsEndpointReturnsItems(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportManifest("Alpha manifest", "owner", "/tmp", "abc", "abc", 123); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportManifest("Beta manifest", "owner", "/tmp", "def", "def", 456); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-manifests/export", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Count      int   `json:"count"`
+		TotalBytes int64 `json:"totalBytes"`
+		Items      []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Count != 2 || payload.TotalBytes != 579 || len(payload.Items) != 2 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	audits, err := a.state.AuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) == 0 || audits[0].Action != "import_manifest_export" {
+		t.Fatalf("expected export audit entry, got %#v", audits)
+	}
+}
+
+func TestAdminExportImportManifestsEndpointDownloadsJson(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportManifest("Alpha manifest", "owner", "/tmp", "abc", "abc", 123); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-manifests/export?download=1&limit=1&offset=0", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="import-manifests.json"` {
+		t.Fatalf("unexpected disposition: %q", got)
+	}
+	var payload struct {
+		Download bool `json:"download"`
+		Count    int  `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Download || payload.Count != 1 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	audits, err := a.state.AuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) == 0 || audits[0].Action != "import_manifest_export" {
+		t.Fatalf("expected export audit entry, got %#v", audits)
+	}
+}
+
+func TestAdminExportImportRunsEndpointReturnsItems(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Feed", "http", "https://example.com", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportRun(1, "queued", "created for test", "abc123", "approved/ref"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportRun(1, "finished", "done", "def456", "approved/ref2"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-runs/export", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Count int `json:"count"`
+		Items []struct {
+			Status string `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Count != 2 || len(payload.Items) != 2 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminExportImportRunsEndpointDownloadsJson(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Feed", "http", "https://example.com", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportRun(1, "queued", "created for test", "abc123", "approved/ref"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-runs/export?download=1&limit=1&offset=0", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="import-runs.json"` {
+		t.Fatalf("unexpected disposition: %q", got)
+	}
+	var payload struct {
+		Download bool `json:"download"`
+		Count    int  `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Download || payload.Count != 1 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminDeleteImportRunEndpointDeletesItem(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportRun(1, "queued", "created for test", "abc123", "approved/ref"); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := a.state.ImportRuns(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) == 0 {
+		t.Fatal("expected at least one run to delete")
+	}
+
+	form := url.Values{"id": []string{strconv.FormatInt(runs[0].ID, 10)}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-runs/delete", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := a.state.ImportRun(runs[0].ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected deleted run to be missing, got %v", err)
+	}
+}
+
+func TestAdminExportImportManifestsEndpointFiltersQuery(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportManifest("Alpha manifest", "owner", "/tmp", "abc", "abc", 123); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportManifest("Beta manifest", "owner", "/tmp", "def", "def", 456); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-manifests/export?limit=1&offset=0&q=alp", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Count int `json:"count"`
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+		Limit  int `json:"limit"`
+		Offset int `json:"offset"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Count != 1 || payload.Limit != 1 || payload.Offset != 0 || len(payload.Items) != 1 || payload.Items[0].Name != "Alpha manifest" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminManifestValidateRejectsTraversal(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"name":        []string{"Bad dataset"},
+		"approved_by": []string{"owner"},
+		"base_dir":    []string{t.TempDir()},
+		"files":       []string{"../escape.txt"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-validate", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminManifestPreviewReturnsJson(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(baseDir, "data.txt"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"name":        []string{"Preview dataset"},
+		"approved_by": []string{"owner"},
+		"base_dir":    []string{baseDir},
+		"files":       []string{"data.txt"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-manifest/preview", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Manifest struct {
+			Name            string `json:"name"`
+			ApprovedBy      string `json:"approvedBy"`
+			PreviewChecksum string `json:"previewChecksum"`
+		} `json:"manifest"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Manifest.Name != "Preview dataset" || payload.Manifest.ApprovedBy != "owner" || payload.Manifest.PreviewChecksum == "" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminAuditsEndpointReturnsItems(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.Audit("import_source_create", "seed audit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.Audit("import_source_toggle", "seed audit 2"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/audits?limit=1&offset=1", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Action  string `json:"action"`
+			Details string `json:"details"`
+		} `json:"items"`
+		Limit      int  `json:"limit"`
+		Offset     int  `json:"offset"`
+		HasMore    bool `json:"hasMore"`
+		NextLimit  int  `json:"nextLimit"`
+		NextOffset int  `json:"nextOffset"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Limit != 1 || payload.Offset != 1 || payload.HasMore || payload.NextLimit != 1 || payload.NextOffset != 1 || len(payload.Items) != 1 || payload.Items[0].Action != "import_source_create" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminStatusEndpointIncludesSections(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	seedState(t, statePath)
+	if err := a.state.Audit("import_source_create", "seed audit"); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginAsAdmin(t, a)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Settings                 map[string]any   `json:"settings"`
+		AdminSessionEpoch        int64            `json:"adminSessionEpoch"`
+		LastLoginAt              any              `json:"lastLoginAt"`
+		LastLogoutAt             any              `json:"lastLogoutAt"`
+		AuditCount               int              `json:"auditCount"`
+		CatalogHealthy           bool             `json:"catalogHealthy"`
+		StateHealthy             bool             `json:"stateHealthy"`
+		ImportSources            []map[string]any `json:"importSources"`
+		ImportRuns               []map[string]any `json:"importRuns"`
+		ImportManifests          []map[string]any `json:"importManifests"`
+		ImportManifestCount      int              `json:"importManifestCount"`
+		ImportManifestTotalCount int              `json:"importManifestTotalCount"`
+		ImportManifestTotalBytes int64            `json:"importManifestTotalBytes"`
+		Audits                   []map[string]any `json:"audits"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Settings == nil || payload.ImportSources == nil || payload.ImportRuns == nil || payload.ImportManifests == nil || payload.Audits == nil || !payload.CatalogHealthy || !payload.StateHealthy || payload.ImportManifestCount < 0 || payload.ImportManifestTotalCount < 0 || payload.ImportManifestTotalBytes < 0 || payload.AdminSessionEpoch != 0 || payload.LastLoginAt == nil || payload.LastLogoutAt != nil {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	if payload.AuditCount != len(payload.Audits) {
+		t.Fatalf("expected auditCount to match returned audits, got %#v", payload)
+	}
+
+	if _, err := a.state.BumpAdminSessionEpoch(); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected old cookie to be revoked after bump, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	bumpedCookie, err := a.signSession("admin", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: bumpedCookie})
+	rec = httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code after bump with refreshed cookie: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.AdminSessionEpoch != 1 {
+		t.Fatalf("expected bumped epoch in status payload, got %#v", payload)
+	}
+	if payload.LastLoginAt == nil {
+		t.Fatalf("expected lastLoginAt in status payload after bump, got %#v", payload)
+	}
+	if payload.LastLogoutAt != nil {
+		t.Fatalf("expected lastLogoutAt to remain nil before logout, got %#v", payload)
+	}
+	if payload.AuditCount != len(payload.Audits) {
+		t.Fatalf("expected auditCount to match returned audits after bump, got %#v", payload)
+	}
+
+	adminPageReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	adminPageReq.AddCookie(&http.Cookie{Name: "admin_session", Value: bumpedCookie})
+	adminPageRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(adminPageRec, adminPageReq)
+	if adminPageRec.Code != http.StatusOK {
+		t.Fatalf("unexpected admin page code after bump: %d body=%s", adminPageRec.Code, adminPageRec.Body.String())
+	}
+	adminPage := adminPageRec.Body.String()
+	if !strings.Contains(adminPage, "Last login audit") || !strings.Contains(adminPage, "Last logout audit") || !strings.Contains(adminPage, "Admin session epoch") {
+		t.Fatalf("expected admin page to include live status labels, got body=%s", adminPage)
+	}
+}
+
+func TestAdminPagesDoNotDependOnWorkingDirectory(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	indexReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	indexRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(indexRec, indexReq)
+	if indexRec.Code != http.StatusOK {
+		t.Fatalf("unexpected index code from alternate cwd: %d body=%s", indexRec.Code, indexRec.Body.String())
+	}
+
+	torrentReq := httptest.NewRequest(http.MethodGet, "/torrent/10", nil)
+	torrentRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(torrentRec, torrentReq)
+	if torrentRec.Code != http.StatusOK {
+		t.Fatalf("unexpected torrent code from alternate cwd: %d body=%s", torrentRec.Code, torrentRec.Body.String())
+	}
+
+	adminReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	adminRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusOK {
+		t.Fatalf("unexpected admin code from alternate cwd: %d body=%s", adminRec.Code, adminRec.Body.String())
+	}
+	if !strings.Contains(adminRec.Body.String(), "Sign in") {
+		t.Fatalf("expected login page to render from alternate cwd, got body=%s", adminRec.Body.String())
+	}
+}
+
+func TestAdminPageReturnsServerErrorWhenTemplateMissing(t *testing.T) {
+	sandboxTemplates(t)
+
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	removeTemplate(t, "admin.html")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.AddCookie(loginAsAdmin(t, a))
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected server error when %s is missing, got %d body=%s", "admin.html", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIndexPageReturnsServerErrorWhenBaseTemplateMissing(t *testing.T) {
+	sandboxTemplates(t)
+
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	removeTemplate(t, "base.html")
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected server error for %s, got %d body=%s", "/", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIndexPageReturnsServerErrorWhenBaseTemplateInvalid(t *testing.T) {
+	sandboxTemplates(t)
+
+	mutateTemplate(t, "base.html", "{{")
+
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected server error for %s, got %d body=%s", "/", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTorrentPageReturnsServerErrorWhenTemplateMissing(t *testing.T) {
+	sandboxTemplates(t)
+
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	removeTemplate(t, "torrent.html")
+
+	req := httptest.NewRequest(http.MethodGet, "/torrent/10", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected server error for %s, got %d body=%s", "/torrent/10", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminLoginPageReturnsServerErrorWhenBaseTemplateMissing(t *testing.T) {
+	sandboxTemplates(t)
+
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	removeTemplate(t, "base.html")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected server error for %s, got %d body=%s", "/admin", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminLoginPageReturnsServerErrorWhenLoginTemplateMissing(t *testing.T) {
+	sandboxTemplates(t)
+
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	removeTemplate(t, "admin_login.html")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected server error for %s, got %d body=%s", "/admin", rec.Code, rec.Body.String())
+	}
+}
+
+func removeTemplate(t *testing.T, name string) {
+	t.Helper()
+	templateFile := templatePath(name)
+	backupFile := templateFile + ".bak"
+	if err := os.Rename(templateFile, backupFile); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Rename(backupFile, templateFile)
+	})
+}
+
+func mutateTemplate(t *testing.T, name, contents string) {
+	t.Helper()
+	templateFile := templatePath(name)
+	original, err := os.ReadFile(templateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(templateFile, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.WriteFile(templateFile, original, 0o600)
+	})
+}
+
+func sandboxTemplates(t *testing.T) {
+	t.Helper()
+
+	srcDir := filepath.Dir(templatePath("base.html"))
+	dstDir := t.TempDir()
+
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		srcPath := filepath.Join(srcDir, entry.Name())
+		dstPath := filepath.Join(dstDir, entry.Name())
+		contents, err := os.ReadFile(srcPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dstPath, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prevTemplateDir := templateDir
+	templateDir = dstDir
+	t.Cleanup(func() {
+		templateDir = prevTemplateDir
+	})
+}
+
+func newSeededTestApp(t *testing.T) *App {
+	t.Helper()
+
+	catalogPath := filepath.Join(t.TempDir(), "catalog.sqlite")
+	statePath := filepath.Join(t.TempDir(), "state.sqlite")
+	seedCatalog(t, catalogPath)
+
+	a, err := New(catalogPath, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func newAdminTestApp(t *testing.T, password string) (*App, string) {
+	t.Helper()
+
+	a, _, statePath := newTestApp(t, password)
+	return a, statePath
+}
+
+func newTestApp(t *testing.T, password string) (*App, string, string) {
+	t.Helper()
+
+	t.Setenv("ADMIN_PASSWORD", password)
+	t.Setenv("ADMIN_SESSION_SECRET", "01234567890123456789012345678901")
+
+	catalogPath := filepath.Join(t.TempDir(), "catalog.sqlite")
+	statePath := filepath.Join(t.TempDir(), "state.sqlite")
+	seedCatalog(t, catalogPath)
+
+	a, err := New(catalogPath, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, catalogPath, statePath
+}
+
+func TestTemplatePathReturnsAbsoluteSourcePaths(t *testing.T) {
+	for _, name := range []string{"base.html", "index.html", "torrent.html", "admin.html", "admin_login.html"} {
+		path := templatePath(name)
+		if !filepath.IsAbs(path) {
+			t.Fatalf("expected absolute path for %s, got %q", name, path)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected template path %s to exist, got %v", path, err)
+		}
+	}
+}
+
+func TestTemplatePathIgnoresWorkingDirectory(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+
+	for _, name := range []string{"base.html", "index.html", "torrent.html", "admin.html", "admin_login.html"} {
+		path := templatePath(name)
+		if !filepath.IsAbs(path) {
+			t.Fatalf("expected absolute path for %s after chdir, got %q", name, path)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected template path %s to exist after chdir, got %v", path, err)
+		}
+	}
+}
+
+func TestAdminAuditDetailEndpointReturnsItem(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.Audit("import_source_create", "seed audit"); err != nil {
+		t.Fatal(err)
+	}
+	audits, err := a.state.AuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/audits/detail?id="+strconv.FormatInt(audits[0].ID, 10), nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Audit struct {
+			ID      int64  `json:"id"`
+			Action  string `json:"action"`
+			Details string `json:"details"`
+		} `json:"audit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Audit.ID != audits[0].ID || payload.Audit.Action != "import_source_create" || payload.Audit.Details != "seed audit" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminExportAuditsEndpointReturnsItems(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.Audit("import_source_create", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.Audit("import_source_toggle", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/audits/export", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Count int `json:"count"`
+		Items []struct {
+			Action string `json:"action"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Count != 2 || len(payload.Items) != 2 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminExportAuditsEndpointDownloadsJson(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.Audit("import_source_create", "first"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/audits/export?download=1&limit=1&offset=0", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="audits.json"` {
+		t.Fatalf("unexpected disposition: %q", got)
+	}
+	var payload struct {
+		Download bool `json:"download"`
+		Count    int  `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Download || payload.Count != 1 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminDeleteAuditEntryEndpointDeletesItem(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.Audit("import_source_create", "first"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := a.state.AuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least one audit entry to delete")
+	}
+
+	form := url.Values{"id": []string{strconv.FormatInt(entries[0].ID, 10)}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/audits/delete", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := a.state.AuditEntry(entries[0].ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected deleted audit entry to be missing, got %v", err)
+	}
+}
+
+func TestAdminImportRunsListEndpointReturnsItems(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportRun(1, "queued", "first", "checksum1", "ref1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportRun(1, "running", "second", "checksum2", "ref2"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-runs/list?limit=1&offset=0", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"items"`
+		Limit      int  `json:"limit"`
+		Offset     int  `json:"offset"`
+		HasMore    bool `json:"hasMore"`
+		NextOffset int  `json:"nextOffset"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Limit != 1 || payload.Offset != 0 || !payload.HasMore || payload.NextOffset != 1 || len(payload.Items) != 1 || payload.Items[0].Message != "second" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminImportSourcesListEndpointReturnsItems(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Alpha", "http", "https://example.com/a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportSource("Beta", "file", "/tmp/b.json", false); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-sources/list?limit=1&offset=0", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+		Limit      int  `json:"limit"`
+		Offset     int  `json:"offset"`
+		HasMore    bool `json:"hasMore"`
+		NextOffset int  `json:"nextOffset"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Limit != 1 || payload.Offset != 0 || !payload.HasMore || payload.NextOffset != 1 || len(payload.Items) != 1 || payload.Items[0].Name != "Beta" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminImportSourceDetailEndpointReturnsItem(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Alpha", "http", "https://example.com/a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportSource("Beta", "file", "/tmp/b.json", false); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := a.state.ImportSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-sources/detail?id="+strconv.FormatInt(sources[0].ID, 10), nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Source struct {
+			ID      int64  `json:"id"`
+			Name    string `json:"name"`
+			Kind    string `json:"kind"`
+			Enabled bool   `json:"enabled"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Source.ID != sources[0].ID || payload.Source.Name != "Beta" || payload.Source.Kind != "file" || payload.Source.Enabled {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminDeleteImportSourceEndpointDeletesItem(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Alpha", "http", "https://example.com/a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportSource("Beta", "file", "/tmp/b.json", false); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := a.state.ImportSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"id": []string{strconv.FormatInt(sources[0].ID, 10)}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-sources/delete", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Deleted bool  `json:"deleted"`
+		ID      int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Deleted || payload.ID != sources[0].ID {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	if _, err := a.state.ImportSource(sources[0].ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected deleted source to be missing, got %v", err)
+	}
+}
+
+func TestAdminExportImportSourcesEndpointReturnsItems(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Alpha", "http", "https://example.com/a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportSource("Beta", "file", "/tmp/b.json", false); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-sources/export", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Count int `json:"count"`
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Count != 3 || len(payload.Items) != 3 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminExportImportSourcesEndpointDownloadsJson(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Alpha", "http", "https://example.com/a", true); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-sources/export?download=1&limit=1&offset=0", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="import-sources.json"` {
+		t.Fatalf("unexpected disposition: %q", got)
+	}
+	var payload struct {
+		Download bool `json:"download"`
+		Count    int  `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Download || payload.Count != 1 {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func TestAdminImportSourcesListEndpointFiltersQuery(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seedState(t, statePath)
+	if err := a.state.CreateImportSource("Alpha", "http", "https://example.com/a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportSource("Beta", "file", "/tmp/b.json", false); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/import-sources/list?limit=10&offset=0&q=alp", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+
+	a.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Name != "Alpha" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+}
+
+func seedCatalog(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`create table categories (id integer primary key, name text)`,
+		`create table torrents (id integer primary key, category integer, status text, name text, numFiles integer, size real, seeders integer, leechers integer, username text, added integer, description text, imdb text, language text, textLanguage text, infoHash text)`,
+		`create table files (id integer primary key, parentTorrentId integer, name text, size real)`,
+		`create table yts_movies (id integer primary key)`,
+		`create table yts_torrent_data (id integer primary key)`,
+		`insert into categories(id, name) values (1, 'Movies')`,
+		`insert into torrents(id, category, status, name, numFiles, size, seeders, leechers, username, added, description, imdb, language, textLanguage, infoHash) values (10, 1, 'ok', 'Test Torrent', 3, 1048576, 7, 2, 'alice', 1710000000, 'hello world', 'tt1234567', 'English', 'English', 'abcdef')`,
+		`insert into files(id, parentTorrentId, name, size) values (1, 10, 'file1.mkv', 1024), (2, 10, 'file2.srt', 2048)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func seedState(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`create table if not exists import_sources (id integer primary key autoincrement, name text not null, kind text not null, location text not null, enabled integer not null default 1, created_at integer not null)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into import_sources(name, kind, location, enabled, created_at) values('Main feed', 'http', 'https://example.com', 1, 1710000000)`); err != nil {
+		t.Fatal(err)
+	}
+}
