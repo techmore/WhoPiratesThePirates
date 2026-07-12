@@ -64,8 +64,15 @@ func ValidateManifest(manifest Manifest, baseDir string) (ValidationResult, erro
 		if !isWithinBase(baseDir, full) {
 			return ValidationResult{}, fmt.Errorf("manifest file escapes base directory: %s", rel)
 		}
+		resolved, err := filepath.EvalSymlinks(full)
+		if err != nil {
+			return ValidationResult{}, err
+		}
+		if !isWithinBase(baseDir, resolved) {
+			return ValidationResult{}, fmt.Errorf("manifest file resolves outside base directory: %s", rel)
+		}
 
-		f, err := os.Open(full)
+		f, err := os.Open(resolved)
 		if err != nil {
 			return ValidationResult{}, err
 		}
@@ -75,7 +82,7 @@ func ValidateManifest(manifest Manifest, baseDir string) (ValidationResult, erro
 			return ValidationResult{}, err
 		}
 		result.TotalBytes += n
-		result.Files = append(result.Files, full)
+		result.Files = append(result.Files, resolved)
 	}
 
 	result.PreviewChecksum = hex.EncodeToString(hash.Sum(nil))
@@ -90,9 +97,15 @@ func isWithinBase(baseDir, path string) bool {
 	if err != nil {
 		return false
 	}
+	if resolvedBase, err := filepath.EvalSymlinks(baseAbs); err == nil {
+		baseAbs = resolvedBase
+	}
 	pathAbs, err := filepath.Abs(path)
 	if err != nil {
 		return false
+	}
+	if resolvedPath, err := filepath.EvalSymlinks(pathAbs); err == nil {
+		pathAbs = resolvedPath
 	}
 	rel, err := filepath.Rel(baseAbs, pathAbs)
 	if err != nil {

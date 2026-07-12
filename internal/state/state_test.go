@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -83,6 +84,9 @@ func TestStateStore(t *testing.T) {
 	if err := st.CreateImportSource("Second feed", "file", "/tmp/second.json", false); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.CreateImportRun(9999, "queued", "invalid source", "", ""); err == nil {
+		t.Fatal("expected foreign-key constraint to reject an import run without a source")
+	}
 	pagedSources, err := st.ImportSourcesOffset(1, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -149,11 +153,28 @@ func TestStateStore(t *testing.T) {
 	if err := st.CreateImportManifest("Second Manifest", "owner", "/tmp", "def", "def", 2048); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.RecordValidatedManifest(sources[0].ID, "queued", "recorded", "approved/ref", "Atomic Manifest", "owner", "/tmp", "ghi", "ghi", 512); err != nil {
+		t.Fatal(err)
+	}
+	manifests, err = st.ImportManifests(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifests) != 2 || manifests[0].Name != "Atomic Manifest" {
+		t.Fatalf("expected atomically recorded manifest, got %#v", manifests)
+	}
+	runs, err = st.ImportRuns(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 || runs[0].ApprovedRef != "approved/ref" {
+		t.Fatalf("expected atomically recorded run, got %#v", runs)
+	}
 	count, totalBytes, err := st.ImportManifestTotals()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || totalBytes != 2048 {
+	if count != 2 || totalBytes != 2560 {
 		t.Fatalf("unexpected manifest totals: count=%d bytes=%d", count, totalBytes)
 	}
 
@@ -235,5 +256,39 @@ func TestStateStore(t *testing.T) {
 	}
 	if newerLogout.ID <= lastLogout.ID || newerLogout.Details != "session revoked again" {
 		t.Fatalf("expected newest logout audit, got %#v after %#v", newerLogout, lastLogout)
+	}
+}
+
+func TestBumpAdminSessionEpochIsAtomic(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	const bumps = 8
+	errs := make(chan error, bumps)
+	var wg sync.WaitGroup
+	for range bumps {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := st.BumpAdminSessionEpoch()
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings, err := st.GetAdminSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AdminSessionEpoch != bumps {
+		t.Fatalf("expected %d atomic bumps, got %d", bumps, settings.AdminSessionEpoch)
 	}
 }

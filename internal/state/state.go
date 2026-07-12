@@ -53,17 +53,19 @@ type ImportManifest struct {
 }
 
 type AdminSettings struct {
-	TorEnabled     bool   `json:"torEnabled"`
-	TorMode        string `json:"torMode"`
-	TorAutostart   bool   `json:"torAutostart"`
-	OnionAddress   string `json:"onionAddress"`
-	TorStatus      string `json:"torStatus"`
-	TorControlAddr string `json:"torControlAddr"`
+	TorEnabled        bool   `json:"torEnabled"`
+	TorMode           string `json:"torMode"`
+	TorAutostart      bool   `json:"torAutostart"`
+	OnionAddress      string `json:"onionAddress"`
+	TorStatus         string `json:"torStatus"`
+	TorControlAddr    string `json:"torControlAddr"`
 	AdminSessionEpoch int64  `json:"adminSessionEpoch"`
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", path))
+	// Foreign-key enforcement is per SQLite connection, so configure it in the
+	// data source name rather than relying on a one-time PRAGMA call.
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path))
 	if err != nil {
 		return nil, err
 	}
@@ -135,12 +137,12 @@ func (s *Store) PutAdminSettings(in AdminSettings) error {
 	}
 	defer tx.Rollback()
 	values := map[string]string{
-		"tor_enabled":      strconv.FormatBool(in.TorEnabled),
-		"tor_mode":         in.TorMode,
-		"tor_autostart":    strconv.FormatBool(in.TorAutostart),
-		"onion_address":    in.OnionAddress,
-		"tor_status":       in.TorStatus,
-		"tor_control_addr": in.TorControlAddr,
+		"tor_enabled":         strconv.FormatBool(in.TorEnabled),
+		"tor_mode":            in.TorMode,
+		"tor_autostart":       strconv.FormatBool(in.TorAutostart),
+		"onion_address":       in.OnionAddress,
+		"tor_status":          in.TorStatus,
+		"tor_control_addr":    in.TorControlAddr,
 		"admin_session_epoch": strconv.FormatInt(in.AdminSessionEpoch, 10),
 	}
 	for k, v := range values {
@@ -152,15 +154,12 @@ func (s *Store) PutAdminSettings(in AdminSettings) error {
 }
 
 func (s *Store) BumpAdminSessionEpoch() (int64, error) {
-	current, err := s.GetAdminSettings()
-	if err != nil {
-		return 0, err
-	}
-	current.AdminSessionEpoch++
-	if err := s.PutAdminSettings(current); err != nil {
-		return 0, err
-	}
-	return current.AdminSessionEpoch, nil
+	var epoch int64
+	err := s.db.QueryRow(`
+		insert into settings(key, value) values('admin_session_epoch', '1')
+		on conflict(key) do update set value = cast(settings.value as integer) + 1
+		returning value`).Scan(&epoch)
+	return epoch, err
 }
 
 func (s *Store) Audit(action, details string) error {
@@ -326,6 +325,30 @@ func (s *Store) CreateImportManifest(name, approvedBy, baseDir, checksum, previe
 		name, approvedBy, baseDir, checksum, previewChecksum, totalBytes, time.Now().Unix(),
 	)
 	return err
+}
+
+// RecordValidatedManifest records the manifest and its queued import run as a
+// single state transition, so an operator never sees one without the other.
+func (s *Store) RecordValidatedManifest(sourceID int64, status, message, approvedRef, name, approvedBy, baseDir, checksum, previewChecksum string, totalBytes int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	if _, err := tx.Exec(
+		`insert into import_runs(source_id, status, started_at, finished_at, message, checksum, approved_ref) values(?, ?, ?, ?, ?, ?, ?)`,
+		sourceID, status, now, now, message, previewChecksum, approvedRef,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`insert into import_manifests(name, approved_by, base_dir, checksum, preview_checksum, total_bytes, created_at) values(?, ?, ?, ?, ?, ?, ?)`,
+		name, approvedBy, baseDir, checksum, previewChecksum, totalBytes, now,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ImportManifests(limit int) ([]ImportManifest, error) {

@@ -37,6 +37,13 @@ func TestCatalogQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cat.Close()
+	var ftsTables int
+	if err := db.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = 'torrent_fts'`).Scan(&ftsTables); err != nil {
+		t.Fatal(err)
+	}
+	if ftsTables != 0 {
+		t.Fatal("opening a catalog must not create derived indexes in the read-only database")
+	}
 
 	stats, err := cat.Stats()
 	if err != nil {
@@ -60,6 +67,18 @@ func TestCatalogQueries(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Name != "Test Torrent" || results[0].CategoryName != "Movies" {
 		t.Fatalf("unexpected search results: %#v", results)
+	}
+
+	results, err = cat.Search("hello", "", "seeders", "desc", 10, 0)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("expected read-only description search to work, results=%#v err=%v", results, err)
+	}
+	results, err = cat.Search("100%_", "", "seeders", "desc", 10, 0)
+	if err != nil {
+		t.Fatalf("escaped wildcard search failed: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("wildcards must be treated literally, got %#v", results)
 	}
 
 	torrent, categoryName, err := cat.Torrent(10)

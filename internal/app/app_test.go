@@ -1,7 +1,10 @@
 package app
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -292,17 +296,163 @@ func TestAdminTorUpdatePreservesSessionEpoch(t *testing.T) {
 	}
 }
 
+func TestAdminTorUpdateRejectsInvalidMode(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookie := loginAsAdmin(t, a)
+	form := url.Values{"tor_mode": []string{"invalid"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/tor", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid tor mode to be rejected, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAdminLogoutRejectsGet(t *testing.T) {
 	a, _ := newAdminTestApp(t, testAdminPassword)
 	defer a.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/logout", nil)
+	cookie := loginAsAdmin(t, a)
+	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 
 	a.Router().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminLogoutRequiresAuthenticatedSession(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/logout", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated logout to be rejected, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	settings, err := a.state.GetAdminSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AdminSessionEpoch != 0 {
+		t.Fatalf("unauthenticated logout must not revoke sessions: %#v", settings)
+	}
+}
+
+func TestRouterRejectsOversizedRequestBodies(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(strings.Repeat("x", int(maxRequestBodyBytes)+1)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected oversized form to be rejected, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminStateChangesRejectCrossOriginRequests(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookie := loginAsAdmin(t, a)
+	req := httptest.NewRequest(http.MethodPost, "http://catalog.test/api/admin/logout", nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected cross-origin logout to be rejected, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	settings, err := a.state.GetAdminSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AdminSessionEpoch != 0 {
+		t.Fatalf("cross-origin request must not revoke sessions: %#v", settings)
+	}
+}
+
+func TestSecurityHeadersAndAdminNoStore(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Header().Get("Content-Security-Policy") == "" || rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("missing security headers: %#v", rec.Header())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected admin response to disable caching, got %q", rec.Header().Get("Cache-Control"))
+	}
+}
+
+func TestAdminSessionExpiresServerSide(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	payload := []byte("admin:0:" + strconv.FormatInt(time.Now().Add(-9*time.Hour).Unix(), 10))
+	sum := hmac.New(sha256.New, a.secret)
+	_, _ = sum.Write(payload)
+	token := base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(sum.Sum(nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: token})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected an expired signed session to be rejected, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminLoginRateLimitAndAudit(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	for range maxLoginFailures {
+		form := url.Values{"password": []string{"wrong"}}
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.RemoteAddr = "192.0.2.10:12345"
+		rec := httptest.NewRecorder()
+		a.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected failed login to be unauthorized, got %d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	form := url.Values{"password": []string{testAdminPassword}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "192.0.2.10:54321"
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected rate-limited login, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	audits, err := a.state.AuditEntriesSearchOffset("admin_login", 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, limited := 0, 0
+	for _, audit := range audits {
+		switch audit.Action {
+		case "admin_login_failed":
+			failed++
+		case "admin_login_rate_limited":
+			limited++
+		}
+	}
+	if failed != maxLoginFailures || limited != 1 {
+		t.Fatalf("unexpected login audit records: %#v", audits)
 	}
 }
 

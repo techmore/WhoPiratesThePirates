@@ -2,7 +2,7 @@
 {{define "body"}}
     {{template "topbar" (dict "Eyebrow" "SQLite catalog browser" "Chips" (list "Read-only catalog" "Go backend" "Separate app state") "ActionHref" "/admin" "ActionLabel" "Admin")}}
     <div class="card search">
-      <input id="q" placeholder="Search titles, descriptions, hashes..." onkeydown="handleSearchKey(event)" />
+      <input id="q" aria-label="Search catalog" placeholder="Search titles, descriptions, hashes..." onkeydown="handleSearchKey(event)" />
       <select id="sort" aria-label="Sort order">
         <option value="hot">Curated</option>
         <option value="newest">Newest</option>

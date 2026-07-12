@@ -43,3 +43,18 @@ func TestValidateManifestRejectsEscape(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestValidateManifestRejectsSymlinkEscape(t *testing.T) {
+	baseDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(baseDir, "linked.txt")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ValidateManifest(Manifest{Name: "bad", Files: []string{"linked.txt"}}, baseDir)
+	if err == nil {
+		t.Fatal("expected symlink escape to be rejected")
+	}
+}

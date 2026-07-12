@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"who-pirates-the-pirates/internal/catalog"
@@ -25,10 +27,24 @@ import (
 )
 
 type App struct {
-	catalog   *catalog.Catalog
-	state     *state.Store
-	adminPass string
-	secret    []byte
+	catalog       *catalog.Catalog
+	state         *state.Store
+	adminPass     string
+	secret        []byte
+	loginAttempts map[string]loginAttempt
+	loginMu       sync.Mutex
+}
+
+const maxRequestBodyBytes int64 = 1 << 20
+
+const (
+	maxLoginFailures = 5
+	loginWindow      = 15 * time.Minute
+)
+
+type loginAttempt struct {
+	failures int
+	resetAt  time.Time
 }
 
 type AdminPageData struct {
@@ -69,10 +85,11 @@ func New(dbPath, statePath string) (*App, error) {
 	}
 
 	return &App{
-		catalog:   db,
-		state:     st,
-		adminPass: os.Getenv("ADMIN_PASSWORD"),
-		secret:    secret,
+		catalog:       db,
+		state:         st,
+		adminPass:     os.Getenv("ADMIN_PASSWORD"),
+		secret:        secret,
+		loginAttempts: make(map[string]loginAttempt),
 	}, nil
 }
 
@@ -108,7 +125,7 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("/api/search", a.handleSearch)
 	mux.HandleFunc("/api/torrents/", a.handleTorrentDetail)
 	mux.HandleFunc("/api/admin/login", a.handleAdminLogin)
-	mux.HandleFunc("/api/admin/logout", a.handleAdminLogout)
+	mux.HandleFunc("/api/admin/logout", a.requireAdmin(a.handleAdminLogout))
 	mux.HandleFunc("/api/admin/status", a.requireAdmin(a.handleAdminStatus))
 	mux.HandleFunc("/api/admin/audits", a.requireAdmin(a.handleAdminAudits))
 	mux.HandleFunc("/api/admin/audits/detail", a.requireAdmin(a.handleAdminAuditDetail))
@@ -135,7 +152,7 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("/api/admin/import-manifest/preview", a.requireAdmin(a.handleAdminPreviewValidatedManifest))
 	mux.HandleFunc("/api/admin/import-manifest/record", a.requireAdmin(a.handleAdminRecordValidatedManifest))
 	mux.HandleFunc("/api/admin/tor", a.requireAdmin(a.handleAdminTorUpdate))
-	return mux
+	return securityHeaders(http.MaxBytesHandler(mux, maxRequestBodyBytes))
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +238,10 @@ func (a *App) renderPage(w http.ResponseWriter, name, page string, data any) err
 }
 
 func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if a.catalog.Healthy() != nil || a.state.Healthy() != nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -289,18 +310,27 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
+	client := clientAddress(r)
+	if a.loginRateLimited(client) {
+		_ = a.state.Audit("admin_login_rate_limited", "client="+client)
+		http.Error(w, "too many login attempts; try again later", http.StatusTooManyRequests)
+		return
+	}
 	if subtleConstantTime([]byte(r.FormValue("password")), []byte(a.adminPass)) == false {
+		a.recordLoginFailure(client)
+		_ = a.state.Audit("admin_login_failed", "client="+client)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	a.clearLoginFailures(client)
 	settings, err := a.state.GetAdminSettings()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "unable to establish session", http.StatusInternalServerError)
 		return
 	}
 	token, err := a.signSession("admin", settings.AdminSessionEpoch)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "unable to establish session", http.StatusInternalServerError)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: 60 * 60 * 8})
@@ -1048,11 +1078,7 @@ func (a *App) handleAdminRecordValidatedManifest(w http.ResponseWriter, r *http.
 	if approvedRef == "" {
 		approvedRef = result.Name
 	}
-	if err := a.state.CreateImportRun(sourceID, runStatus, message, result.PreviewChecksum, approvedRef); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := a.state.CreateImportManifest(result.Name, approvedBy, strings.TrimSpace(r.FormValue("base_dir")), result.Checksum, result.PreviewChecksum, result.TotalBytes); err != nil {
+	if err := a.state.RecordValidatedManifest(sourceID, runStatus, message, approvedRef, result.Name, approvedBy, strings.TrimSpace(r.FormValue("base_dir")), result.Checksum, result.PreviewChecksum, result.TotalBytes); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1135,6 +1161,10 @@ func (a *App) handleAdminTorUpdate(w http.ResponseWriter, r *http.Request) {
 	if settings.TorMode == "" {
 		settings.TorMode = "off"
 	}
+	if !validTorMode(settings.TorMode) {
+		http.Error(w, "invalid tor mode", http.StatusBadRequest)
+		return
+	}
 	if err := a.state.PutAdminSettings(settings); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -1161,8 +1191,48 @@ func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		if isUnsafeMethod(r.Method) && !sameOrigin(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		next(w, r)
 	}
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		if r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/api/admin/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isUnsafeMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+// sameOrigin rejects cross-origin browser requests while allowing non-browser
+// clients that do not send Origin or Referer headers.
+func sameOrigin(r *http.Request) bool {
+	value := r.Header.Get("Origin")
+	if value == "" {
+		value = r.Referer()
+	}
+	if value == "" {
+		return true
+	}
+	u, err := url.Parse(value)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host == r.Host
 }
 
 func (a *App) isAdmin(r *http.Request) bool {
@@ -1187,7 +1257,8 @@ func (a *App) isAdmin(r *http.Request) bool {
 		return false
 	}
 	epoch, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
+	issuedAt, issuedErr := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil || issuedErr != nil || issuedAt > time.Now().Add(time.Minute).Unix() || time.Since(time.Unix(issuedAt, 0)) > 8*time.Hour {
 		return false
 	}
 	settings, err := a.state.GetAdminSettings()
@@ -1197,6 +1268,49 @@ func (a *App) isAdmin(r *http.Request) bool {
 	sum := hmac.New(sha256.New, a.secret)
 	sum.Write(payload)
 	return hmac.Equal(mac, sum.Sum(nil))
+}
+
+func clientAddress(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	if r.RemoteAddr != "" {
+		return r.RemoteAddr
+	}
+	return "unknown"
+}
+
+func (a *App) loginRateLimited(client string) bool {
+	a.loginMu.Lock()
+	defer a.loginMu.Unlock()
+	attempt, ok := a.loginAttempts[client]
+	if !ok {
+		return false
+	}
+	if time.Now().After(attempt.resetAt) {
+		delete(a.loginAttempts, client)
+		return false
+	}
+	return attempt.failures >= maxLoginFailures
+}
+
+func (a *App) recordLoginFailure(client string) {
+	a.loginMu.Lock()
+	defer a.loginMu.Unlock()
+	now := time.Now()
+	attempt := a.loginAttempts[client]
+	if attempt.resetAt.IsZero() || now.After(attempt.resetAt) {
+		attempt = loginAttempt{resetAt: now.Add(loginWindow)}
+	}
+	attempt.failures++
+	a.loginAttempts[client] = attempt
+}
+
+func (a *App) clearLoginFailures(client string) {
+	a.loginMu.Lock()
+	defer a.loginMu.Unlock()
+	delete(a.loginAttempts, client)
 }
 
 func (a *App) signSession(subject string, epoch ...int64) (string, error) {
@@ -1234,6 +1348,15 @@ func clampInt(n, min, max int) int {
 		return max
 	}
 	return n
+}
+
+func validTorMode(mode string) bool {
+	switch mode {
+	case "off", "clearnet", "onion", "dual":
+		return true
+	default:
+		return false
+	}
 }
 
 func formatBytes(n float64) string {

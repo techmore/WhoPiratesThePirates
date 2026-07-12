@@ -3,7 +3,6 @@ package catalog
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -52,9 +51,6 @@ type Stats struct {
 }
 
 func Open(path string) (*Catalog, error) {
-	if err := ensureFTSIndex(path); err != nil {
-		return nil, err
-	}
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path))
 	if err != nil {
 		return nil, err
@@ -133,28 +129,22 @@ func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset i
 	}
 
 	base := `
-		select t.id, t.category, t.status, t.name, t.numFiles, t.size, t.seeders, t.leechers, t.username, t.added, t.description, t.imdb, t.language, t.textLanguage, t.infoHash, coalesce(c.name, '')`
-	if strings.TrimSpace(q) != "" {
-		base += `, bm25(torrent_fts) as rank`
-	}
-	base += `
+		select t.id, t.category, t.status, t.name, t.numFiles, t.size, t.seeders, t.leechers, t.username, t.added, t.description, t.imdb, t.language, t.textLanguage, t.infoHash, coalesce(c.name, '')
 		from torrents t`
 	args := make([]any, 0, 6)
-	if strings.TrimSpace(q) != "" {
-		base += `
-		join torrent_fts on torrent_fts.rowid = t.id and torrent_fts match ?`
-		args = append(args, ftsQuery(q))
-	}
 	base += `
 		left join categories c on c.id = t.category`
 	where := []string{`(? = '' or t.category = ?)`}
 	args = append(args, category, category)
-	base += ` where ` + strings.Join(where, ` and `)
-	if strings.TrimSpace(q) != "" {
-		base += ` order by rank asc, ` + orderBy + ``
-	} else {
-		base += ` order by ` + orderBy
+	if q = strings.TrimSpace(q); q != "" {
+		// LIKE keeps the catalog connection strictly read-only. Any future FTS
+		// acceleration belongs in an application-owned derived database.
+		where = append(where, `(coalesce(t.name, '') like ? escape '\' or coalesce(t.description, '') like ? escape '\' or coalesce(t.infoHash, '') like ? escape '\')`)
+		pattern := "%" + escapeLike(q) + "%"
+		args = append(args, pattern, pattern, pattern)
 	}
+	base += ` where ` + strings.Join(where, ` and `)
+	base += ` order by ` + orderBy
 	base += ` limit ? offset ?`
 	args = append(args, limit, offset)
 
@@ -167,92 +157,18 @@ func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset i
 	var items []Torrent
 	for rows.Next() {
 		var item Torrent
-		if strings.TrimSpace(q) != "" {
-			var rank float64
-			if err := rows.Scan(&item.ID, &item.Category, &item.Status, &item.Name, &item.NumFiles, &item.Size, &item.Seeders, &item.Leechers, &item.Username, &item.Added, &item.Description, &item.IMDB, &item.Language, &item.TextLanguage, &item.InfoHash, &item.CategoryName, &rank); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := rows.Scan(&item.ID, &item.Category, &item.Status, &item.Name, &item.NumFiles, &item.Size, &item.Seeders, &item.Leechers, &item.Username, &item.Added, &item.Description, &item.IMDB, &item.Language, &item.TextLanguage, &item.InfoHash, &item.CategoryName); err != nil {
-				return nil, err
-			}
+		if err := rows.Scan(&item.ID, &item.Category, &item.Status, &item.Name, &item.NumFiles, &item.Size, &item.Seeders, &item.Leechers, &item.Username, &item.Added, &item.Description, &item.IMDB, &item.Language, &item.TextLanguage, &item.InfoHash, &item.CategoryName); err != nil {
+			return nil, err
 		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
 }
 
-func ensureFTSIndex(path string) error {
-	if _, err := os.Stat(path); err != nil {
-		return err
-	}
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", path))
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	definition := ""
-	if row := db.QueryRow(`select coalesce(sql, '') from sqlite_master where type='table' and name='torrent_fts'`); row != nil {
-		_ = row.Scan(&definition)
-	}
-	if strings.Contains(definition, "content='torrents'") {
-		if _, err := db.Exec(`drop table if exists torrent_fts`); err != nil {
-			return err
-		}
-		definition = ""
-	}
-	if definition == "" {
-		if _, err := db.Exec(`create virtual table torrent_fts using fts5(name, description, tokenize='unicode61')`); err != nil {
-			return err
-		}
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`insert into torrent_fts(rowid, name, description) select id, coalesce(name, ''), coalesce(description, '') from torrents`); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		return nil
-	}
-	var hasRow int
-	if err := db.QueryRow(`select exists(select 1 from torrent_fts limit 1)`).Scan(&hasRow); err != nil {
-		return err
-	}
-	if hasRow == 0 {
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`insert into torrent_fts(rowid, name, description) select id, coalesce(name, ''), coalesce(description, '') from torrents`); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func ftsQuery(q string) string {
-	fields := strings.Fields(strings.ToLower(q))
-	if len(fields) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(fields))
-	for _, field := range fields {
-		field = strings.ReplaceAll(field, "\"", "")
-		field = strings.TrimSpace(field)
-		if field == "" {
-			continue
-		}
-		parts = append(parts, field+"*")
-	}
-	return strings.Join(parts, " AND ")
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	return strings.ReplaceAll(s, "_", "\\_")
 }
 
 func (c *Catalog) Torrent(id int64) (Torrent, string, error) {
