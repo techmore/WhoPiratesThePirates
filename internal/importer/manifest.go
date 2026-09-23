@@ -32,14 +32,39 @@ type ValidationResult struct {
 
 var ErrMissingManifest = errors.New("manifest is required")
 
+const (
+	DefaultMaxManifestFiles       = 256
+	DefaultMaxManifestBytes int64 = 512 * 1024 * 1024
+)
+
+type ManifestLimits struct {
+	MaxFiles int
+	MaxBytes int64
+}
+
+var DefaultManifestLimits = ManifestLimits{
+	MaxFiles: DefaultMaxManifestFiles,
+	MaxBytes: DefaultMaxManifestBytes,
+}
+
 // ValidateManifest ensures the import request points to local files,
 // normalizes file paths, and validates an optional sha256 checksum.
 func ValidateManifest(manifest Manifest, baseDir string) (ValidationResult, error) {
+	return ValidateManifestWithLimits(manifest, baseDir, DefaultManifestLimits)
+}
+
+func ValidateManifestWithLimits(manifest Manifest, baseDir string, limits ManifestLimits) (ValidationResult, error) {
 	if strings.TrimSpace(manifest.Name) == "" {
 		return ValidationResult{}, fmt.Errorf("manifest name is required")
 	}
 	if len(manifest.Files) == 0 {
 		return ValidationResult{}, fmt.Errorf("at least one file is required")
+	}
+	if limits.MaxFiles <= 0 || limits.MaxBytes <= 0 {
+		return ValidationResult{}, fmt.Errorf("manifest limits must be positive")
+	}
+	if len(manifest.Files) > limits.MaxFiles {
+		return ValidationResult{}, fmt.Errorf("manifest contains too many files: maximum is %d", limits.MaxFiles)
 	}
 	if strings.TrimSpace(baseDir) == "" {
 		baseDir = "."
@@ -52,6 +77,7 @@ func ValidateManifest(manifest Manifest, baseDir string) (ValidationResult, erro
 	}
 
 	hash := sha256.New()
+	seen := make(map[string]struct{}, len(manifest.Files))
 	for _, raw := range manifest.Files {
 		rel := strings.TrimSpace(raw)
 		if rel == "" {
@@ -71,15 +97,33 @@ func ValidateManifest(manifest Manifest, baseDir string) (ValidationResult, erro
 		if !isWithinBase(baseDir, resolved) {
 			return ValidationResult{}, fmt.Errorf("manifest file resolves outside base directory: %s", rel)
 		}
+		if _, ok := seen[resolved]; ok {
+			return ValidationResult{}, fmt.Errorf("manifest contains duplicate file: %s", rel)
+		}
+		seen[resolved] = struct{}{}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return ValidationResult{}, err
+		}
+		if !info.Mode().IsRegular() {
+			return ValidationResult{}, fmt.Errorf("manifest file must be regular: %s", rel)
+		}
+		remaining := limits.MaxBytes - result.TotalBytes
+		if remaining <= 0 {
+			return ValidationResult{}, fmt.Errorf("manifest exceeds maximum total size of %d bytes", limits.MaxBytes)
+		}
 
 		f, err := os.Open(resolved)
 		if err != nil {
 			return ValidationResult{}, err
 		}
-		n, err := io.Copy(hash, f)
+		n, err := io.Copy(hash, io.LimitReader(f, remaining+1))
 		_ = f.Close()
 		if err != nil {
 			return ValidationResult{}, err
+		}
+		if n > remaining {
+			return ValidationResult{}, fmt.Errorf("manifest exceeds maximum total size of %d bytes", limits.MaxBytes)
 		}
 		result.TotalBytes += n
 		result.Files = append(result.Files, resolved)

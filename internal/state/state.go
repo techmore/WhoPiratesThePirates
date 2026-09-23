@@ -312,9 +312,10 @@ func (s *Store) DeleteImportSource(id int64) error {
 }
 
 func (s *Store) CreateImportRun(sourceID int64, status, message, checksum, approvedRef string) error {
+	now := time.Now().Unix()
 	_, err := s.db.Exec(
 		`insert into import_runs(source_id, status, started_at, finished_at, message, checksum, approved_ref) values(?, ?, ?, ?, ?, ?, ?)`,
-		sourceID, status, time.Now().Unix(), time.Now().Unix(), message, checksum, approvedRef,
+		sourceID, status, now, 0, message, checksum, approvedRef,
 	)
 	return err
 }
@@ -338,7 +339,7 @@ func (s *Store) RecordValidatedManifest(sourceID int64, status, message, approve
 	now := time.Now().Unix()
 	if _, err := tx.Exec(
 		`insert into import_runs(source_id, status, started_at, finished_at, message, checksum, approved_ref) values(?, ?, ?, ?, ?, ?, ?)`,
-		sourceID, status, now, now, message, previewChecksum, approvedRef,
+		sourceID, status, now, 0, message, previewChecksum, approvedRef,
 	); err != nil {
 		return err
 	}

@@ -6,7 +6,7 @@ It intentionally does **not** implement scraping, mirroring, or update automatio
 
 ## What Exists Now
 
-- Read-only catalog browsing from the bundled SQLite database
+- Read-only catalog browsing from an operator-provided SQLite database
 - Search, category filtering, detail pages, and a health endpoint
 - A protected admin surface for app-owned Tor-related settings
 - A separate writable SQLite file for application state
@@ -14,6 +14,7 @@ It intentionally does **not** implement scraping, mirroring, or update automatio
 - Authorized manifest validation with checksum preview and record flow
 - Live admin status, paged viewers, and inline refresh controls
 - Server-side admin session revocation with login/logout audit timestamps
+- HTML templates embedded in the server binary
 
 ## Environment
 
@@ -21,7 +22,19 @@ It intentionally does **not** implement scraping, mirroring, or update automatio
 - `APP_STATE_PATH`: path to the writable app-state SQLite file, defaults to `app_state.sqlite`
 - `ADMIN_PASSWORD`: password required to sign into the admin panel
 - `ADMIN_SESSION_SECRET`: optional secret for signing admin sessions
+- `APP_BIND_ADDR`: listen address, defaults to `127.0.0.1`
+- `APP_TLS_CERT_FILE` and `APP_TLS_KEY_FILE`: optional certificate and key for direct HTTPS
+- `APP_COOKIE_SECURE`: set to `true` when HTTPS terminates at a trusted reverse proxy
+- `APP_ALLOW_INSECURE_HTTP`: explicit override for serving HTTP on a non-loopback address
 - `PORT`: listen port, defaults to `8080`
+
+The catalog database is not committed to this repository. Provide it through
+`APP_DB_PATH` before starting the server. HTTP is loopback-only by default;
+use direct TLS or a trusted TLS-terminating reverse proxy for network access.
+The server refuses non-loopback plaintext HTTP unless
+`APP_ALLOW_INSECURE_HTTP=true` is explicitly set.
+Manifest validation is bounded to 256 files and 512 MiB of aggregate file
+content by default.
 
 ## Roadmap
 

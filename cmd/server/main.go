@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,12 +31,32 @@ func main() {
 		port = "8080"
 	}
 
-	svc, err := app.New(dbPath, statePath)
+	bindAddr := os.Getenv("APP_BIND_ADDR")
+	if bindAddr == "" {
+		bindAddr = "127.0.0.1"
+	}
+	tlsCertFile := os.Getenv("APP_TLS_CERT_FILE")
+	tlsKeyFile := os.Getenv("APP_TLS_KEY_FILE")
+	tlsEnabled := tlsCertFile != "" || tlsKeyFile != ""
+	if tlsEnabled && (tlsCertFile == "" || tlsKeyFile == "") {
+		log.Fatal("APP_TLS_CERT_FILE and APP_TLS_KEY_FILE must be configured together")
+	}
+	allowInsecureHTTP := envEnabled(os.Getenv("APP_ALLOW_INSECURE_HTTP"))
+	if !tlsEnabled && !isLoopbackAddress(bindAddr) && !allowInsecureHTTP {
+		log.Fatalf("refusing insecure HTTP on non-loopback address %q; configure TLS or set APP_ALLOW_INSECURE_HTTP=true explicitly", bindAddr)
+	}
+	if !tlsEnabled && !isLoopbackAddress(bindAddr) {
+		log.Printf("warning: serving admin credentials over insecure HTTP on %s", bindAddr)
+	}
+
+	svc, err := app.NewWithOptions(dbPath, statePath, app.Options{
+		SecureCookies: tlsEnabled || envEnabled(os.Getenv("APP_COOKIE_SECURE")),
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	addr := ":" + port
+	addr := net.JoinHostPort(bindAddr, port)
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           svc.Router(),
@@ -46,7 +68,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 1)
-	go func() { errCh <- server.ListenAndServe() }()
+	go func() {
+		if tlsEnabled {
+			errCh <- server.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
+			return
+		}
+		errCh <- server.ListenAndServe()
+	}()
 	log.Printf("listening on %s", addr)
 
 	select {
@@ -65,4 +93,18 @@ func main() {
 			log.Printf("database close: %v", err)
 		}
 	}
+}
+
+func isLoopbackAddress(value string) bool {
+	host := strings.TrimSpace(value)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func envEnabled(value string) bool {
+	return value == "1" || strings.EqualFold(strings.TrimSpace(value), "true")
 }

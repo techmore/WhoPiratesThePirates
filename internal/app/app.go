@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +31,7 @@ type App struct {
 	state         *state.Store
 	adminPass     string
 	secret        []byte
+	secureCookies bool
 	loginAttempts map[string]loginAttempt
 	loginMu       sync.Mutex
 }
@@ -38,13 +39,15 @@ type App struct {
 const maxRequestBodyBytes int64 = 1 << 20
 
 const (
-	maxLoginFailures = 5
-	loginWindow      = 15 * time.Minute
+	maxLoginFailures       = 5
+	loginWindow            = 15 * time.Minute
+	maxTrackedLoginClients = 1024
 )
 
 type loginAttempt struct {
 	failures int
 	resetAt  time.Time
+	lastSeen time.Time
 }
 
 type AdminPageData struct {
@@ -55,15 +58,24 @@ type AdminPageData struct {
 	AuditEntries    []state.AuditEntry
 }
 
-var templateDir = func() string {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		return filepath.Join("internal", "app", "templates")
-	}
-	return filepath.Join(filepath.Dir(file), "templates")
-}()
+//go:embed templates/*.html
+var templateFS embed.FS
+
+// templateDir is a test-only override. Production rendering uses templateFS
+// so the server remains deployable as a single binary.
+var templateDir string
 
 func New(dbPath, statePath string) (*App, error) {
+	return NewWithOptions(dbPath, statePath, Options{
+		SecureCookies: envEnabled(os.Getenv("APP_COOKIE_SECURE")),
+	})
+}
+
+type Options struct {
+	SecureCookies bool
+}
+
+func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 	db, err := catalog.Open(dbPath)
 	if err != nil {
 		return nil, err
@@ -89,6 +101,7 @@ func New(dbPath, statePath string) (*App, error) {
 		state:         st,
 		adminPass:     os.Getenv("ADMIN_PASSWORD"),
 		secret:        secret,
+		secureCookies: options.SecureCookies,
 		loginAttempts: make(map[string]loginAttempt),
 	}, nil
 }
@@ -109,7 +122,7 @@ func (a *App) Close() error {
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf(strings.Join(errs, "; "))
+		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
 }
@@ -218,19 +231,27 @@ func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func templatePath(name string) string {
+	if templateDir == "" {
+		return filepath.Join("templates", name)
+	}
 	return filepath.Join(templateDir, name)
 }
 
 func (a *App) renderPage(w http.ResponseWriter, name, page string, data any) error {
-	tpl, err := template.New(name).Funcs(template.FuncMap{
+	builder := template.New(name).Funcs(template.FuncMap{
 		"dict":     dict,
 		"list":     list,
 		"urlquery": url.QueryEscape,
-	}).ParseFiles(templatePath(page))
-	if err != nil {
-		return err
+	})
+	var (
+		tpl *template.Template
+		err error
+	)
+	if templateDir != "" {
+		tpl, err = builder.ParseFiles(templatePath(page), templatePath("base.html"))
+	} else {
+		tpl, err = builder.ParseFS(templateFS, "templates/"+page, "templates/base.html")
 	}
-	tpl, err = tpl.ParseFiles(templatePath("base.html"))
 	if err != nil {
 		return err
 	}
@@ -316,7 +337,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many login attempts; try again later", http.StatusTooManyRequests)
 		return
 	}
-	if subtleConstantTime([]byte(r.FormValue("password")), []byte(a.adminPass)) == false {
+	if !subtleConstantTime([]byte(r.FormValue("password")), []byte(a.adminPass)) {
 		a.recordLoginFailure(client)
 		_ = a.state.Audit("admin_login_failed", "client="+client)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -333,7 +354,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unable to establish session", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: 60 * 60 * 8})
+	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: a.secureCookies || r.TLS != nil, MaxAge: 60 * 60 * 8})
 	_ = a.state.Audit("admin_login", "session established")
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
@@ -348,7 +369,7 @@ func (a *App) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.state.Audit("admin_logout", "session revoked")
-	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: a.secureCookies || r.TLS != nil})
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
@@ -1284,6 +1305,7 @@ func clientAddress(r *http.Request) string {
 func (a *App) loginRateLimited(client string) bool {
 	a.loginMu.Lock()
 	defer a.loginMu.Unlock()
+	a.pruneLoginAttempts(time.Now())
 	attempt, ok := a.loginAttempts[client]
 	if !ok {
 		return false
@@ -1299,12 +1321,39 @@ func (a *App) recordLoginFailure(client string) {
 	a.loginMu.Lock()
 	defer a.loginMu.Unlock()
 	now := time.Now()
+	a.pruneLoginAttempts(now)
+	if _, ok := a.loginAttempts[client]; !ok && len(a.loginAttempts) >= maxTrackedLoginClients {
+		a.evictOldestLoginAttempt()
+	}
 	attempt := a.loginAttempts[client]
 	if attempt.resetAt.IsZero() || now.After(attempt.resetAt) {
 		attempt = loginAttempt{resetAt: now.Add(loginWindow)}
 	}
 	attempt.failures++
+	attempt.lastSeen = now
 	a.loginAttempts[client] = attempt
+}
+
+func (a *App) pruneLoginAttempts(now time.Time) {
+	for client, attempt := range a.loginAttempts {
+		if !attempt.resetAt.IsZero() && now.After(attempt.resetAt) {
+			delete(a.loginAttempts, client)
+		}
+	}
+}
+
+func (a *App) evictOldestLoginAttempt() {
+	var oldestClient string
+	var oldest time.Time
+	for client, attempt := range a.loginAttempts {
+		if oldestClient == "" || attempt.lastSeen.Before(oldest) {
+			oldestClient = client
+			oldest = attempt.lastSeen
+		}
+	}
+	if oldestClient != "" {
+		delete(a.loginAttempts, oldestClient)
+	}
 }
 
 func (a *App) clearLoginFailures(client string) {
@@ -1436,4 +1485,8 @@ func subtleConstantTime(a, b []byte) bool {
 		diff |= a[i] ^ b[i]
 	}
 	return diff == 0
+}
+
+func envEnabled(value string) bool {
+	return value == "1" || strings.EqualFold(strings.TrimSpace(value), "true")
 }

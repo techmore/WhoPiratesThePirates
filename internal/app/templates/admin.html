@@ -760,10 +760,6 @@
               manifestsOffset = 0;
               loadManifests();
             });
-            manifestsDeleteForm.addEventListener('submit', function(ev) {
-              ev.preventDefault();
-              deleteSelectedManifest();
-            });
             function syncManifestsTimer() {
               if (manifestsTimer) {
                 clearInterval(manifestsTimer);
@@ -783,15 +779,10 @@
           const copyBtn = document.getElementById('manifest-preview-copy');
           let latestJson = '';
           if (!form || !out || !copyBtn) return;
-          function wireDeleteConfirmation(formEl, message) {
-            if (!formEl) return;
-            formEl.addEventListener('submit', function(ev) {
-              if (!window.confirm(message)) {
-                ev.preventDefault();
-              }
-            });
-          }
-          async function submitDeleteForm(formEl, onSuccess) {
+          async function submitDeleteForm(formEl, confirmMessage, onSuccess) {
+            if (confirmMessage && !window.confirm(confirmMessage)) {
+              return;
+            }
             const response = await fetch(formEl.action, {
               method: 'POST',
               body: new FormData(formEl),
@@ -805,11 +796,10 @@
             }
           }
           document.querySelectorAll('form[action="/api/admin/import-sources/delete"]').forEach(function(formEl) {
-            wireDeleteConfirmation(formEl, 'Delete this import source?');
             formEl.addEventListener('submit', async function(ev) {
               ev.preventDefault();
               try {
-                await submitDeleteForm(formEl, function() {
+                await submitDeleteForm(formEl, 'Delete this import source?', function() {
                   window.location.reload();
                 });
               } catch (err) {
@@ -818,11 +808,10 @@
             });
           });
           document.querySelectorAll('form[action="/api/admin/import-runs/delete"]').forEach(function(formEl) {
-            wireDeleteConfirmation(formEl, 'Delete this import run?');
             formEl.addEventListener('submit', async function(ev) {
               ev.preventDefault();
               try {
-                await submitDeleteForm(formEl, function() {
+                await submitDeleteForm(formEl, 'Delete this import run?', function() {
                   window.location.reload();
                 });
               } catch (err) {
@@ -842,11 +831,10 @@
             }
           });
           document.querySelectorAll('form[action="/api/admin/audits/delete"]').forEach(function(formEl) {
-            wireDeleteConfirmation(formEl, 'Delete this audit entry?');
             formEl.addEventListener('submit', async function(ev) {
               ev.preventDefault();
               try {
-                await submitDeleteForm(formEl, function() {
+                await submitDeleteForm(formEl, 'Delete this audit entry?', function() {
                   window.location.reload();
                 });
               } catch (err) {

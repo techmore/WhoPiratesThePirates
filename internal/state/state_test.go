@@ -109,7 +109,7 @@ func TestStateStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runs) != 1 || runs[0].Status != "queued" || runs[0].ApprovedRef != "approved/ref" {
+	if len(runs) != 1 || runs[0].Status != "queued" || runs[0].ApprovedRef != "approved/ref" || runs[0].FinishedAt != 0 {
 		t.Fatalf("unexpected import runs: %#v", runs)
 	}
 	runCount, err := st.ImportRunTotals()
@@ -167,7 +167,7 @@ func TestStateStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runs) != 2 || runs[0].ApprovedRef != "approved/ref" {
+	if len(runs) != 2 || runs[0].ApprovedRef != "approved/ref" || runs[0].FinishedAt != 0 {
 		t.Fatalf("expected atomically recorded run, got %#v", runs)
 	}
 	count, totalBytes, err := st.ImportManifestTotals()

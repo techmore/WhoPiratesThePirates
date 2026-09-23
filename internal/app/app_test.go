@@ -456,6 +456,35 @@ func TestAdminLoginRateLimitAndAudit(t *testing.T) {
 	}
 }
 
+func TestLoginAttemptTrackingIsBounded(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	for i := 0; i < maxTrackedLoginClients+100; i++ {
+		a.recordLoginFailure("client-" + strconv.Itoa(i))
+	}
+	if got := len(a.loginAttempts); got > maxTrackedLoginClients {
+		t.Fatalf("expected at most %d tracked clients, got %d", maxTrackedLoginClients, got)
+	}
+}
+
+func TestSecureCookieOptionMarksAdminSession(t *testing.T) {
+	a, catalogPath, statePath := newTestApp(t, testAdminPassword)
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewWithOptions(catalogPath, statePath, Options{SecureCookies: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	cookie := loginAsAdmin(t, a)
+	if !cookie.Secure {
+		t.Fatalf("expected secure admin session cookie, got %#v", cookie)
+	}
+}
+
 func TestAdminLogoutRevocationSurvivesRestart(t *testing.T) {
 	a, catalogPath, statePath := newTestApp(t, testAdminPassword)
 
@@ -1567,10 +1596,9 @@ func mutateTemplate(t *testing.T, name, contents string) {
 func sandboxTemplates(t *testing.T) {
 	t.Helper()
 
-	srcDir := filepath.Dir(templatePath("base.html"))
 	dstDir := t.TempDir()
 
-	entries, err := os.ReadDir(srcDir)
+	entries, err := templateFS.ReadDir("templates")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1578,9 +1606,8 @@ func sandboxTemplates(t *testing.T) {
 		if entry.IsDir() {
 			continue
 		}
-		srcPath := filepath.Join(srcDir, entry.Name())
 		dstPath := filepath.Join(dstDir, entry.Name())
-		contents, err := os.ReadFile(srcPath)
+		contents, err := templateFS.ReadFile("templates/" + entry.Name())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1594,20 +1621,6 @@ func sandboxTemplates(t *testing.T) {
 	t.Cleanup(func() {
 		templateDir = prevTemplateDir
 	})
-}
-
-func newSeededTestApp(t *testing.T) *App {
-	t.Helper()
-
-	catalogPath := filepath.Join(t.TempDir(), "catalog.sqlite")
-	statePath := filepath.Join(t.TempDir(), "state.sqlite")
-	seedCatalog(t, catalogPath)
-
-	a, err := New(catalogPath, statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return a
 }
 
 func newAdminTestApp(t *testing.T, password string) (*App, string) {
@@ -1634,19 +1647,15 @@ func newTestApp(t *testing.T, password string) (*App, string, string) {
 	return a, catalogPath, statePath
 }
 
-func TestTemplatePathReturnsAbsoluteSourcePaths(t *testing.T) {
+func TestEmbeddedTemplatesExist(t *testing.T) {
 	for _, name := range []string{"base.html", "index.html", "torrent.html", "admin.html", "admin_login.html"} {
-		path := templatePath(name)
-		if !filepath.IsAbs(path) {
-			t.Fatalf("expected absolute path for %s, got %q", name, path)
-		}
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected template path %s to exist, got %v", path, err)
+		if _, err := templateFS.ReadFile("templates/" + name); err != nil {
+			t.Fatalf("expected embedded template %s to exist, got %v", name, err)
 		}
 	}
 }
 
-func TestTemplatePathIgnoresWorkingDirectory(t *testing.T) {
+func TestEmbeddedTemplatesIgnoreWorkingDirectory(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -1660,12 +1669,8 @@ func TestTemplatePathIgnoresWorkingDirectory(t *testing.T) {
 	})
 
 	for _, name := range []string{"base.html", "index.html", "torrent.html", "admin.html", "admin_login.html"} {
-		path := templatePath(name)
-		if !filepath.IsAbs(path) {
-			t.Fatalf("expected absolute path for %s after chdir, got %q", name, path)
-		}
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected template path %s to exist after chdir, got %v", path, err)
+		if _, err := templateFS.ReadFile("templates/" + name); err != nil {
+			t.Fatalf("expected embedded template %s after chdir, got %v", name, err)
 		}
 	}
 }

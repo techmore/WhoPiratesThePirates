@@ -25,16 +25,17 @@ The repository already has the first working slice:
 
 - `cmd/server` starts the HTTP server
 - `internal/app` hosts handlers, auth, and SQLite access
-- `tpb.sqlite` is opened read-only for catalog browsing
+- the operator-provided catalog SQLite database is opened read-only for browsing
 - `app_state.sqlite` stores settings, audit rows, and session revocation state
 - templates render a search page, detail page, and admin surface
+- HTML templates are embedded in the server binary
 - the admin page includes live status, paged viewers, and manifest validation tools
 
 This is already a valid phase-1 baseline.
 
 ## Data Model
 
-The bundled catalog database currently exposes these tables:
+The catalog database currently exposes these tables:
 
 - `torrents`
 - `files`

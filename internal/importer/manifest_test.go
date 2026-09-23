@@ -58,3 +58,30 @@ func TestValidateManifestRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal("expected symlink escape to be rejected")
 	}
 }
+
+func TestValidateManifestEnforcesLimits(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.txt")
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateManifestWithLimits(Manifest{Name: "too many", Files: []string{"data.txt", "data.txt"}}, dir, ManifestLimits{MaxFiles: 1, MaxBytes: 100}); err == nil {
+		t.Fatal("expected file-count limit to reject the manifest")
+	}
+	if _, err := ValidateManifestWithLimits(Manifest{Name: "too large", Files: []string{"data.txt"}}, dir, ManifestLimits{MaxFiles: 2, MaxBytes: 4}); err == nil {
+		t.Fatal("expected byte limit to reject the manifest")
+	}
+}
+
+func TestValidateManifestRejectsDuplicateFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.txt")
+	if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateManifest(Manifest{Name: "duplicate", Files: []string{"data.txt", "./data.txt"}}, dir); err == nil {
+		t.Fatal("expected duplicate file entries to be rejected")
+	}
+}
