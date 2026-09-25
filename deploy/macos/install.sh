@@ -38,13 +38,11 @@ if [[ ! -f "$service_env" ]]; then
   echo "created $service_env; set ADMIN_PASSWORD before using the admin surface"
 fi
 
-cat >"$run_script" <<'EOF'
+cat >"$run_script" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-set -a
-. "$(cd "$(dirname "$0")" && pwd)/service.env"
-set +a
-exec "$(cd "$(dirname "$0")" && pwd)/bin/whop2p"
+export WHOP2P_HOME=$(printf '%q' "$support")
+exec "\$(cd "\$(dirname "\$0")" && pwd)/bin/whop2p"
 EOF
 chmod 0700 "$run_script"
 
