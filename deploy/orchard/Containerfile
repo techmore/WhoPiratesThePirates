@@ -1,0 +1,21 @@
+# Build from the repository root after `make build`:
+#   container build -f deploy/orchard/Containerfile -t who-pirates-the-pirates:local .
+#
+# The base image is init-capable so Apple `container machine` can boot it.
+FROM geerlingguy/docker-ubuntu2204-ansible:latest
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --user-group --home-dir /var/lib/who-pirates-the-pirates --shell /usr/sbin/nologin who-pirates-the-pirates \
+    && install -d -m 0750 -o who-pirates-the-pirates -g who-pirates-the-pirates /var/lib/who-pirates-the-pirates
+
+COPY bin/whop2p /usr/local/bin/whop2p
+COPY deploy/orchard/who-pirates-the-pirates.service /etc/systemd/system/who-pirates-the-pirates.service
+COPY deploy/orchard/who-pirates-the-pirates.env.example /etc/who-pirates-the-pirates.env.example
+
+RUN chmod 0755 /usr/local/bin/whop2p \
+    && ln -sf whop2p /usr/local/bin/who-pirates-the-pirates \
+    && systemctl enable who-pirates-the-pirates.service
+
+ENTRYPOINT ["/sbin/init"]

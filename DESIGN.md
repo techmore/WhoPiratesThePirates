@@ -113,7 +113,14 @@ Phase 2 expands the system without changing the trust boundary:
 2. Add authorized import adapters for datasets the operator controls or is allowed to ingest.
 3. Add optional validation and checksum/manifest support.
 4. Add derived indexes or FTS if search performance requires it.
-5. Package the binary for macOS, Linux, and Windows.
+5. Package the binary for macOS and Linux with native service definitions:
+
+- macOS `launchd` for a lightweight native service
+- Apple `container machine` plus Orchard for an isolated Mac deployment
+- Ubuntu `systemd` for server-native operation
+
+Deployment assets live under `deploy/`. The service should remain a single pure-Go
+binary so operators can choose the host supervisor without adopting Docker.
 
 ## UI Direction
 

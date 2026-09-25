@@ -49,7 +49,22 @@ content by default.
 - Add authorized import adapters only
 - Add optional validation for approved datasets
 - Add derived indexes or search acceleration if needed
-- Package for macOS, Linux, and Windows
+- Package for macOS and Linux with native service definitions
+- Keep the catalog read-only and the app state separate in every deployment
+
+## Deployment
+
+The server is a single pure-Go binary and does not require Docker.
+
+- macOS native: `deploy/macos` installs a per-user `launchd` service.
+- macOS isolated: `deploy/orchard` builds an Apple `container machine` image that can be managed from Orchard.
+- Ubuntu: `deploy/ubuntu` installs an unprivileged `systemd` service.
+- The short executable name is `whop2p`; a `who-pirates-the-pirates` alias is installed alongside it.
+- Cross-compile release binaries with `make linux` and `make darwin`.
+
+In every deployment, keep the catalog database read-only and keep app state in a
+separate writable database. The default bind address is loopback; use a private
+network or TLS reverse proxy for remote access.
 
 ## Admin And Tor
 

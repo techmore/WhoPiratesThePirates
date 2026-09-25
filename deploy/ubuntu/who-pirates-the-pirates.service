@@ -1,0 +1,31 @@
+[Unit]
+Description=Who Pirates The Pirates catalog service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=who-pirates-the-pirates
+Group=who-pirates-the-pirates
+WorkingDirectory=/var/lib/who-pirates-the-pirates
+EnvironmentFile=/etc/who-pirates-the-pirates.env
+ExecStart=/usr/local/bin/whop2p
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+
+# The catalog is read-only. Only the app-state directory needs to be writable.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/who-pirates-the-pirates
+
+[Install]
+WantedBy=multi-user.target
