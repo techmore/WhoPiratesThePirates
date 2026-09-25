@@ -96,4 +96,29 @@ func TestCatalogQueries(t *testing.T) {
 	if len(files) != 2 || files[0].SizeHuman == "" {
 		t.Fatalf("unexpected files: %#v", files)
 	}
+
+	if _, err := db.Exec(`insert into torrents(id, category, status, name, numFiles, size, seeders, leechers, username, added, description, infoHash) values (11, 1, 'ok', 'Newer Torrent', 1, 2048, 1, 0, 'bob', 1710000100, 'newer', 'fedcba')`); err != nil {
+		t.Fatal(err)
+	}
+	results, total, err := cat.SearchPage("torrent", "", "newest", "asc", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(results) != 1 || results[0].ID != 11 {
+		t.Fatalf("unexpected newest page: total=%d results=%#v", total, results)
+	}
+	results, total, err = cat.SearchPage("torrent", "1", "newest", "asc", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(results) != 1 || results[0].ID != 10 {
+		t.Fatalf("unexpected second page: total=%d results=%#v", total, results)
+	}
+	results, total, err = cat.SearchPage("torrent", "", "hot", "desc", -1, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(results) != 0 {
+		t.Fatalf("expected invalid page bounds to return no rows safely, total=%d results=%#v", total, results)
+	}
 }

@@ -3,7 +3,7 @@
     {{template "topbar" (dict "Eyebrow" "SQLite catalog browser" "Chips" (list "Read-only catalog" "Go backend" "Separate app state") "ActionHref" "/admin" "ActionLabel" "Admin")}}
     <div class="card search">
       <input id="q" aria-label="Search catalog" placeholder="Search titles, descriptions, hashes..." onkeydown="handleSearchKey(event)" />
-      <select id="sort" aria-label="Sort order">
+      <select id="sort" aria-label="Sort order" onchange="currentSort = this.value; if (this.value === 'hot' || this.value === 'newest' || this.value === 'seeders') currentDir = 'desc'; search(0)">
         <option value="hot">Curated</option>
         <option value="newest">Newest</option>
         <option value="seeders">Seeders</option>
@@ -46,8 +46,8 @@
       <div class="pager">
         <div id="pageinfo" class="muted"></div>
         <div class="page-nav">
-          <button class="secondary" onclick="prevPage()">Previous</button>
-          <button class="secondary" onclick="nextPage()">Next</button>
+          <button id="prev-page" class="secondary" onclick="prevPage()">Previous</button>
+          <button id="next-page" class="secondary" onclick="nextPage()">Next</button>
         </div>
       </div>
     </div>
@@ -55,9 +55,10 @@
     let currentOffset = 0;
     let currentLimit = 100;
     let currentCategory = '';
-    let currentSort = 'seeders';
+    let currentSort = 'hot';
     let currentDir = 'desc';
-    let currentSortLabel = 'Seeders';
+    let currentSortLabel = 'Curated';
+    let currentTotal = 0;
     async function loadStats() {
       const stats = await fetch('/api/stats').then(r => r.json());
       const order = ['torrents', 'files', 'categories', 'yts_movies', 'yts_torrent_data'];
@@ -103,7 +104,9 @@
     }
     async function search(offset) {
       const q = document.getElementById('q').value || '';
-      currentSort = document.getElementById('sort').value || 'seeders';
+      const sortLabels = { hot: 'Curated', newest: 'Newest', seeders: 'Seeders', name: 'Name', category: 'Category', size: 'Size', leechers: 'Leechers', added: 'Added' };
+      currentSortLabel = sortLabels[currentSort] || currentSort;
+      if (currentSort === 'hot' || currentSort === 'newest') currentDir = 'desc';
       currentLimit = parseInt(document.getElementById('limit').value || '100', 10);
       currentOffset = offset || 0;
       updateViewStatus('Searching...');
@@ -120,7 +123,12 @@
         const res = await fetch('/api/search?' + params.toString());
         const data = await res.json();
         document.getElementById('rows').innerHTML = data.items.map(item => '<tr><td><a href="/torrent/' + item.id + '">' + escapeHtml(item.name) + '</a><div class="muted">' + escapeHtml(item.username || '') + '</div></td><td>' + escapeHtml(item.categoryName || String(item.category)) + '</td><td>' + formatSize(item.size) + '</td><td>' + item.seeders + '</td><td>' + item.leechers + '</td><td>' + new Date(item.added * 1000).toLocaleString() + '</td><td><button type="button" class="secondary" onclick="window.location.href=\'/torrent/' + item.id + '#magnet\'">Magnet</button></td></tr>').join('');
-        document.getElementById('pageinfo').textContent = data.items.length ? ('Showing ' + (data.offset + 1) + ' - ' + (data.offset + data.items.length) + (currentCategory ? ' in category ' + currentCategory : '') + ' · sorted by ' + currentSortLabel + ' ' + (currentDir === 'desc' ? 'descending' : 'ascending')) : 'No results';
+        const total = Number(data.total || 0);
+        currentTotal = total;
+        const end = data.offset + data.items.length;
+        document.getElementById('pageinfo').textContent = data.items.length ? ('Showing ' + (data.offset + 1) + ' - ' + end + ' of ' + total + (currentCategory ? ' in category ' + currentCategory : '') + ' · sorted by ' + currentSortLabel + ' ' + (currentDir === 'desc' ? 'descending' : 'ascending')) : 'No results';
+        document.getElementById('prev-page').disabled = data.offset <= 0;
+        document.getElementById('next-page').disabled = !data.hasMore;
         results.classList.toggle('empty', data.items.length === 0);
         updateViewStatus();
       } catch (error) {
@@ -139,7 +147,7 @@
         search(0);
       }
     }
-    function nextPage() { search(currentOffset + currentLimit); }
+    function nextPage() { if (currentOffset + currentLimit < currentTotal) search(currentOffset + currentLimit); }
     function prevPage() { search(Math.max(0, currentOffset - currentLimit)); }
     function sortBy(field, label) {
       if (currentSort === field) {

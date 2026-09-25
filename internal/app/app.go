@@ -34,6 +34,7 @@ type App struct {
 	secureCookies bool
 	loginAttempts map[string]loginAttempt
 	loginMu       sync.Mutex
+	embedded      map[string]*template.Template
 }
 
 const maxRequestBodyBytes int64 = 1 << 20
@@ -95,6 +96,12 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 			return nil, err
 		}
 	}
+	embedded, err := loadEmbeddedTemplates()
+	if err != nil {
+		_ = db.Close()
+		_ = st.Close()
+		return nil, err
+	}
 
 	return &App{
 		catalog:       db,
@@ -103,6 +110,7 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 		secret:        secret,
 		secureCookies: options.SecureCookies,
 		loginAttempts: make(map[string]loginAttempt),
+		embedded:      embedded,
 	}, nil
 }
 
@@ -220,11 +228,31 @@ func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s, _ := a.state.GetAdminSettings()
-	sources, _ := a.state.ImportSources()
-	runs, _ := a.state.ImportRuns(10)
-	manifests, _ := a.state.ImportManifests(10)
-	audits, _ := a.state.AuditEntries(10)
+	s, err := a.state.GetAdminSettings()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sources, err := a.state.ImportSources()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	runs, err := a.state.ImportRuns(10)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	manifests, err := a.state.ImportManifests(10)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	audits, err := a.state.AuditEntries(10)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := a.renderPage(w, "admin", "admin.html", AdminPageData{AdminSettings: s, ImportSources: sources, ImportRuns: runs, ImportManifests: manifests, AuditEntries: audits}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -237,21 +265,39 @@ func templatePath(name string) string {
 	return filepath.Join(templateDir, name)
 }
 
+func loadEmbeddedTemplates() (map[string]*template.Template, error) {
+	pages := []string{"index.html", "torrent.html", "admin.html", "admin_login.html"}
+	loaded := make(map[string]*template.Template, len(pages))
+	for _, page := range pages {
+		builder := template.New(page).Funcs(template.FuncMap{
+			"dict":     dict,
+			"list":     list,
+			"urlquery": url.QueryEscape,
+		})
+		tpl, err := builder.ParseFS(templateFS, "templates/"+page, "templates/base.html")
+		if err != nil {
+			return nil, err
+		}
+		loaded[page] = tpl
+	}
+	return loaded, nil
+}
+
 func (a *App) renderPage(w http.ResponseWriter, name, page string, data any) error {
+	if templateDir == "" {
+		tpl, ok := a.embedded[page]
+		if !ok {
+			return fmt.Errorf("embedded template %q is not loaded", page)
+		}
+		return tpl.ExecuteTemplate(w, "base", data)
+	}
+
 	builder := template.New(name).Funcs(template.FuncMap{
 		"dict":     dict,
 		"list":     list,
 		"urlquery": url.QueryEscape,
 	})
-	var (
-		tpl *template.Template
-		err error
-	)
-	if templateDir != "" {
-		tpl, err = builder.ParseFiles(templatePath(page), templatePath("base.html"))
-	} else {
-		tpl, err = builder.ParseFS(templateFS, "templates/"+page, "templates/base.html")
-	}
+	tpl, err := builder.ParseFiles(templatePath(page), templatePath("base.html"))
 	if err != nil {
 		return err
 	}
@@ -291,12 +337,17 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	sortDir := strings.TrimSpace(r.URL.Query().Get("dir"))
 	limit := clampInt(queryInt(r, "limit", 100), 1, 100)
 	offset := clampInt(queryInt(r, "offset", 0), 0, 1000000)
-	items, err := a.catalog.Search(q, category, sortField, sortDir, limit, offset)
+	items, total, err := a.catalog.SearchPage(q, category, sortField, sortDir, limit, offset)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	writeJSON(w, map[string]any{"items": items, "limit": limit, "offset": offset, "query": q, "category": category, "sort": sortField, "dir": sortDir, "nextOffset": offset + len(items)})
+	hasMore := int64(offset)+int64(len(items)) < total
+	nextOffset := offset + len(items)
+	if !hasMore {
+		nextOffset = offset
+	}
+	writeJSON(w, map[string]any{"items": items, "limit": limit, "offset": offset, "total": total, "hasMore": hasMore, "query": q, "category": category, "sort": sortField, "dir": sortDir, "nextOffset": nextOffset})
 }
 
 func (a *App) handleTorrentDetail(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +370,10 @@ func (a *App) handleTorrentDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1226,6 +1281,9 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		if r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/api/admin/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
@@ -1253,7 +1311,14 @@ func sameOrigin(r *http.Request) bool {
 		return true
 	}
 	u, err := url.Parse(value)
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host == r.Host
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host != r.Host {
+		return false
+	}
+	requestScheme := "http"
+	if r.TLS != nil {
+		requestScheme = "https"
+	}
+	return u.Scheme == requestScheme
 }
 
 func (a *App) isAdmin(r *http.Request) bool {
@@ -1477,12 +1542,14 @@ func list(values ...any) []any {
 }
 
 func subtleConstantTime(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
+	// Compare fixed-size SHA-256 digests so callers cannot distinguish
+	// password lengths through timing. The digest comparison is constant time
+	// even when the supplied secrets have different lengths.
+	adigest := sha256.Sum256(a)
+	bdigest := sha256.Sum256(b)
 	var diff byte
-	for i := range a {
-		diff |= a[i] ^ b[i]
+	for i := range adigest {
+		diff |= adigest[i] ^ bdigest[i]
 	}
 	return diff == 0
 }

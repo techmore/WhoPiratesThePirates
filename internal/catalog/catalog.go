@@ -106,6 +106,69 @@ func (c *Catalog) Categories() ([]Category, error) {
 }
 
 func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset int) ([]Torrent, error) {
+	orderBy, where, args := searchQuery(q, category, sortField, sortDir)
+	limit, offset = normalizePage(limit, offset)
+	return c.searchItems(orderBy, where, args, limit, offset)
+}
+
+// SearchPage returns one page of results and the total number of matching
+// records. The catalog is read-only, so the count is intentionally computed
+// with the same predicate as the page query rather than relying on a derived
+// table that may not exist in the source database.
+func (c *Catalog) SearchPage(q, category, sortField, sortDir string, limit, offset int) ([]Torrent, int64, error) {
+	orderBy, where, args := searchQuery(q, category, sortField, sortDir)
+	limit, offset = normalizePage(limit, offset)
+
+	var total int64
+	if err := c.db.QueryRow(`select count(*) from torrents t left join categories c on c.id = t.category where `+strings.Join(where, ` and `), args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	items, err := c.searchItems(orderBy, where, args, limit, offset)
+	return items, total, err
+}
+
+func (c *Catalog) searchItems(orderBy string, where []string, args []any, limit, offset int) ([]Torrent, error) {
+	query := `
+		select t.id, t.category, t.status, t.name, t.numFiles, t.size, t.seeders, t.leechers, t.username, t.added, t.description, t.imdb, t.language, t.textLanguage, t.infoHash, coalesce(c.name, '')
+		from torrents t
+		left join categories c on c.id = t.category
+		where ` + strings.Join(where, ` and `) + ` order by ` + orderBy + ` limit ? offset ?`
+	queryArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := c.db.Query(query, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]Torrent, 0, limit)
+	for rows.Next() {
+		var item Torrent
+		if err := rows.Scan(&item.ID, &item.Category, &item.Status, &item.Name, &item.NumFiles, &item.Size, &item.Seeders, &item.Leechers, &item.Username, &item.Added, &item.Description, &item.IMDB, &item.Language, &item.TextLanguage, &item.InfoHash, &item.CategoryName); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func normalizePage(limit, offset int) (int, int) {
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > 1000000 {
+		offset = 1000000
+	}
+	return limit, offset
+}
+
+func searchQuery(q, category, sortField, sortDir string) (string, []string, []any) {
 	orderBy := "seeders desc, added desc"
 	dir := "asc"
 	if strings.EqualFold(sortDir, "desc") {
@@ -122,19 +185,16 @@ func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset i
 		orderBy = "seeders " + dir + ", leechers asc, added desc"
 	case "leechers":
 		orderBy = "leechers " + dir + ", seeders desc, added desc"
+	case "newest":
+		orderBy = "added desc, seeders desc"
 	case "added":
 		orderBy = "added " + dir + ", seeders desc"
 	case "", "hot":
 		orderBy = "seeders desc, added desc"
 	}
 
-	base := `
-		select t.id, t.category, t.status, t.name, t.numFiles, t.size, t.seeders, t.leechers, t.username, t.added, t.description, t.imdb, t.language, t.textLanguage, t.infoHash, coalesce(c.name, '')
-		from torrents t`
-	args := make([]any, 0, 6)
-	base += `
-		left join categories c on c.id = t.category`
 	where := []string{`(? = '' or t.category = ?)`}
+	args := make([]any, 0, 6)
 	args = append(args, category, category)
 	if q = strings.TrimSpace(q); q != "" {
 		// LIKE keeps the catalog connection strictly read-only. Any future FTS
@@ -143,26 +203,7 @@ func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset i
 		pattern := "%" + escapeLike(q) + "%"
 		args = append(args, pattern, pattern, pattern)
 	}
-	base += ` where ` + strings.Join(where, ` and `)
-	base += ` order by ` + orderBy
-	base += ` limit ? offset ?`
-	args = append(args, limit, offset)
-
-	rows, err := c.db.Query(base, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var items []Torrent
-	for rows.Next() {
-		var item Torrent
-		if err := rows.Scan(&item.ID, &item.Category, &item.Status, &item.Name, &item.NumFiles, &item.Size, &item.Seeders, &item.Leechers, &item.Username, &item.Added, &item.Description, &item.IMDB, &item.Language, &item.TextLanguage, &item.InfoHash, &item.CategoryName); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return orderBy, where, args
 }
 
 func escapeLike(s string) string {

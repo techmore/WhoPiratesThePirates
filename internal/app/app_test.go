@@ -3,6 +3,7 @@ package app
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -2151,6 +2152,98 @@ func seedCatalog(t *testing.T, path string) {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestAdminLoginRejectsCrossOriginRequests(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	form := url.Values{"password": []string{testAdminPassword}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://attacker.example")
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected cross-origin login to be rejected, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSearchEndpointReturnsPaginationMetadata(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	requests := []struct {
+		path       string
+		offset     int
+		items      int
+		nextOffset int
+	}{
+		{path: "/api/search?limit=1&offset=0&sort=newest", offset: 0, items: 1, nextOffset: 0},
+		{path: "/api/search?limit=1&offset=1&sort=newest", offset: 1, items: 0, nextOffset: 1},
+		{path: "/api/search?limit=1&category=1", offset: 0, items: 1, nextOffset: 0},
+	}
+	for _, test := range requests {
+		rec := httptest.NewRecorder()
+		a.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, test.path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("unexpected search status for %s: %d body=%s", test.path, rec.Code, rec.Body.String())
+		}
+		var payload struct {
+			Items      []map[string]any `json:"items"`
+			Total      int64            `json:"total"`
+			Offset     int              `json:"offset"`
+			HasMore    bool             `json:"hasMore"`
+			NextOffset int              `json:"nextOffset"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Total != 1 || payload.Offset != test.offset || len(payload.Items) != test.items || payload.HasMore || payload.NextOffset != test.nextOffset {
+			t.Fatalf("unexpected pagination metadata for %s: %#v", test.path, payload)
+		}
+	}
+}
+
+func TestSecurityHeadersIncludeHSTSForTLSRequests(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.TLS = &tls.ConnectionState{}
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if got := rec.Header().Get("Strict-Transport-Security"); !strings.Contains(got, "max-age=31536000") {
+		t.Fatalf("expected HSTS for TLS request, got %q", got)
+	}
+}
+
+func TestSameOriginRejectsCrossSchemeRequests(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", nil)
+	req.Host = "catalog.example"
+	req.Header.Set("Origin", "http://catalog.example")
+	req.TLS = &tls.ConnectionState{}
+	if sameOrigin(req) {
+		t.Fatal("expected an HTTP origin on an HTTPS request to be rejected")
+	}
+	req.TLS = nil
+	req.Header.Set("Origin", "https://catalog.example")
+	if sameOrigin(req) {
+		t.Fatal("expected an HTTPS origin on an HTTP request to be rejected")
+	}
+	req.Header.Set("Origin", "http://catalog.example")
+	if !sameOrigin(req) {
+		t.Fatal("expected matching HTTP origin to be accepted")
+	}
+}
+
+func TestSubtleConstantTimeAcceptsEqualValuesOnly(t *testing.T) {
+	if !subtleConstantTime([]byte("secret"), []byte("secret")) {
+		t.Fatal("expected equal values to compare true")
+	}
+	if subtleConstantTime([]byte("secret"), []byte("different length")) || subtleConstantTime([]byte("secret"), []byte("wrong")) {
+		t.Fatal("expected unequal values to compare false")
 	}
 }
 
