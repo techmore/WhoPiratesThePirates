@@ -131,3 +131,22 @@ func TestLoadServiceEnvDoesNotOverrideShellEnvironment(t *testing.T) {
 		t.Fatalf("expected service bind address to load, got %q", os.Getenv("APP_BIND_ADDR"))
 	}
 }
+
+func TestLoadServiceEnvPreservesPathsWithSpaces(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "Application Support", "WhoPiratesThePirates")
+	t.Setenv("WHOP2P_HOME", home)
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	catalog := filepath.Join(home, "catalog.sqlite")
+	if err := os.WriteFile(filepath.Join(home, "service.env"), []byte("APP_DB_PATH="+catalog+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APP_DB_PATH", "")
+	if err := loadServiceEnv(); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("APP_DB_PATH") != catalog {
+		t.Fatalf("expected path with spaces to load unchanged, got %q", os.Getenv("APP_DB_PATH"))
+	}
+}

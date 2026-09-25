@@ -27,12 +27,12 @@ fi
 if [[ ! -f "$service_env" ]]; then
   session_secret=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
   {
-    printf 'APP_DB_PATH=%q\n' "$support/catalog.sqlite"
-    printf 'APP_STATE_PATH=%q\n' "$support/app_state.sqlite"
-    printf 'APP_BIND_ADDR=%q\n' "127.0.0.1"
-    printf 'PORT=%q\n' "8080"
-    printf 'ADMIN_PASSWORD=%q\n' ""
-    printf 'ADMIN_SESSION_SECRET=%q\n' "$session_secret"
+    printf 'APP_DB_PATH=%s\n' "$support/catalog.sqlite"
+    printf 'APP_STATE_PATH=%s\n' "$support/app_state.sqlite"
+    printf 'APP_BIND_ADDR=%s\n' "127.0.0.1"
+    printf 'PORT=%s\n' "8080"
+    printf 'ADMIN_PASSWORD=%s\n' ""
+    printf 'ADMIN_SESSION_SECRET=%s\n' "$session_secret"
   } >"$service_env"
   chmod 0600 "$service_env"
   echo "created $service_env; set ADMIN_PASSWORD before using the admin surface"

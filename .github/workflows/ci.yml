@@ -25,7 +25,12 @@ jobs:
           cache: true
       - name: Test
         run: go test ./...
+      - name: Race test
+        run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: E2E test
+        if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/e2e.sh
       - name: Build
         run: make build

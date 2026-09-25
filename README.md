@@ -1,115 +1,268 @@
-# Torrent Catalog
+# whop2p
 
-This repository is a lawful, SQLite-backed torrent metadata browser with a Go backend and a dense, search-first UI.
+A private, read-only torrent metadata browser for operator-provided SQLite
+catalogs.
 
-It intentionally does **not** implement scraping, mirroring, or update automation for Pirate Bay or other infringing sources.
+`whop2p` is a single pure-Go server binary with an embedded web UI. It is
+designed for private catalog exploration, backup rotation, and metadata review.
+The catalog database is opened read-only; application state is stored in a
+separate writable database.
 
-## What Exists Now
+The short command is `whop2p`. A `who-pirates-the-pirates` compatibility alias
+is also installed.
 
-- Read-only catalog browsing from an operator-provided SQLite database
-- Search, category filtering, detail pages, and a health endpoint
-- A protected admin surface for app-owned Tor-related settings
-- A separate writable SQLite file for application state
-- Audit logs, approved import sources, and import runs in app state
-- Authorized manifest validation with checksum preview and record flow
-- Live admin status, paged viewers, and inline refresh controls
-- Server-side admin session revocation with login/logout audit timestamps
-- HTML templates embedded in the server binary
+## What it does
 
-## Environment
+- Search titles, descriptions, categories, and info hashes
+- Browse torrent detail pages and file listings
+- Render validated BitTorrent v1 magnet links
+- Load a validated local SQLite catalog backup
+- Run a private admin surface with audit logging
+- Record operator-authorized magnet or `.torrent` references as metadata
+- Detect whether an external `aria2c` binary is available
+- Deploy on macOS, Ubuntu, or an Apple `container machine`
 
-- `APP_DB_PATH`: path to the read-only catalog database, defaults to `tpb.sqlite`
-- `APP_STATE_PATH`: path to the writable app-state SQLite file, defaults to `app_state.sqlite`
-- `ADMIN_PASSWORD`: password required to sign into the admin panel
-- `ADMIN_SESSION_SECRET`: optional secret for signing admin sessions
-- `APP_BIND_ADDR`: listen address, defaults to `127.0.0.1`
-- `APP_TLS_CERT_FILE` and `APP_TLS_KEY_FILE`: optional certificate and key for direct HTTPS
-- `APP_COOKIE_SECURE`: set to `true` when HTTPS terminates at a trusted reverse proxy
-- `APP_ALLOW_INSECURE_HTTP`: explicit override for serving HTTP on a non-loopback address
-- `PORT`: listen port, defaults to `8080`
+## What it does not do
 
-The catalog database is not committed to this repository. Provide it through
-`APP_DB_PATH` before starting the server. HTTP is loopback-only by default;
-use direct TLS or a trusted TLS-terminating reverse proxy for network access.
-The server refuses non-loopback plaintext HTTP unless
-`APP_ALLOW_INSECURE_HTTP=true` is explicitly set.
-Manifest validation is bounded to 256 files and 512 MiB of aggregate file
-content by default.
+`whop2p` does not fetch, mirror, seed, or automatically download content. It
+does not contact trackers or acquire data from sources the operator is not
+authorized to use.
 
-## Roadmap
+External torrent clients such as `aria2c` or qBittorrent may be used for
+content you own or are explicitly authorized to use. The server only reports
+whether `aria2c` is installed; it never invokes it.
 
-### Phase 1
+The catalog database is not committed to this repository. Provide an authorized
+backup through `whop2p load-catalog` or `APP_DB_PATH`.
 
-- Serve the existing catalog data in a modern shell
-- Keep all catalog access read-only
-- Keep state and audit data in the app-owned SQLite file
+## Install
 
-### Phase 2
+### macOS with Homebrew
 
-- Add authorized import adapters only
-- Add optional validation for approved datasets
-- Add derived indexes or search acceleration if needed
-- Package for macOS and Linux with native service definitions
-- Keep the catalog read-only and the app state separate in every deployment
+```sh
+brew install techmore/tap/whop2p
+whop2p --version
+```
 
-## Deployment
+### Build from source
 
-The server is a single pure-Go binary and does not require Docker.
+```sh
+make build
+./bin/whop2p --version
+```
 
-- macOS native: `deploy/macos` installs a per-user `launchd` service.
-- macOS isolated: `deploy/orchard` builds an Apple `container machine` image that can be managed from Orchard.
-- Ubuntu: `deploy/ubuntu` installs an unprivileged `systemd` service.
-- The short executable name is `whop2p`; a `who-pirates-the-pirates` alias is installed alongside it.
-- Homebrew releases will be available as `brew install techmore/tap/whop2p`.
-- Cross-compile release binaries with `make linux` and `make darwin`.
+### macOS native service
 
-After installation, initialize the local configuration and start the service:
+```sh
+./deploy/macos/install.sh ./bin/who-pirates-the-pirates /path/to/catalog.sqlite
+```
+
+The installer creates a per-user `launchd` service under:
+
+```text
+~/Library/Application Support/WhoPiratesThePirates/
+~/Library/LaunchAgents/com.who-pirates-the-pirates.plist
+```
+
+### Ubuntu
+
+```sh
+sudo deploy/ubuntu/install.sh ./bin/whop2p /path/to/catalog.sqlite
+sudo systemctl status who-pirates-the-pirates
+```
+
+The Ubuntu service runs as an unprivileged user, binds to loopback by default,
+and keeps the catalog separate from writable app state.
+
+### Apple Container and Orchard
+
+The isolated macOS path uses Apple's native `container` runtime rather than
+Docker:
+
+```sh
+make build
+container build -f deploy/orchard/Containerfile -t whop2p:local .
+container machine create whop2p:local --name catalog
+container machine run -n catalog
+```
+
+Orchard can manage the machine, logs, resources, mounts, and network from its
+native macOS UI.
+
+## First run
 
 ```sh
 whop2p setup
-whop2p load-catalog /path/to/validated-catalog.sqlite
-brew services start whop2p
+```
+
+This creates:
+
+```text
+~/.config/whop2p/catalog.sqlite
+~/.config/whop2p/app_state.sqlite
+~/.config/whop2p/service.env
+```
+
+`setup` never overwrites an existing catalog. `service.env` is mode `0600` and
+should be edited before enabling the admin surface:
+
+```sh
+chmod 600 ~/.config/whop2p/service.env
+$EDITOR ~/.config/whop2p/service.env
+```
+
+Set at least:
+
+```text
+ADMIN_PASSWORD=use-a-long-random-password
+```
+
+Start and open the local service:
+
+```sh
+brew services start whop2p       # macOS
 whop2p open
 ```
 
-`whop2p setup` creates a private configuration directory, an empty catalog, app
-state, and a mode-0600 service environment file. It never overwrites an
-existing catalog. `whop2p load-catalog` validates SQLite integrity and the
-required catalog tables, backs up the current catalog, then atomically installs
-the new one. Set `ADMIN_PASSWORD` in the generated `service.env` before using
-the admin surface.
+`whop2p open` checks `/healthz` before opening the default browser.
 
-In every deployment, keep the catalog database read-only and keep app state in a
-separate writable database. The default bind address is loopback; use a private
-network or TLS reverse proxy for remote access.
+On Ubuntu, use `systemctl` instead of `brew services`.
 
-The admin status panel reports whether an external `aria2c` binary is available,
-but the service never invokes it or downloads content automatically. Use an
-external client for torrents you own or are authorized to use, then load the
-resulting catalog backup with `whop2p load-catalog`.
+## Loading a catalog backup
 
-Release and Homebrew tap instructions live in [`docs/RELEASING.md`](docs/RELEASING.md).
+The application never modifies a source catalog in place. Validate and install
+a local backup with:
 
-## Admin And Tor
+```sh
+whop2p load-catalog /path/to/catalog.sqlite
+brew services restart whop2p     # macOS
+sudo systemctl restart who-pirates-the-pirates # Ubuntu
+```
 
-The admin panel stores Tor configuration in app state, but it does not manage a Tor daemon directly yet.
+The loader:
 
-Supported modes:
+1. Verifies the file is a regular SQLite database.
+2. Runs `PRAGMA integrity_check`.
+3. Verifies `torrents`, `files`, and `categories` exist.
+4. Rejects an empty catalog.
+5. Backs up the current catalog.
+6. Atomically installs the replacement.
 
-- `off`
-- `clearnet`
-- `onion`
-- `dual`
+The catalog remains read-only after installation. App-owned state is written
+only to `app_state.sqlite`.
 
-The admin surface also exposes:
+## Environment
 
-- `/api/admin/status` for live counts, DB health, session epoch, and last login/logout audit timestamps
-- `/api/admin/audits` for paged audit inspection
-- `/api/admin/import-runs/list` and `/api/admin/import-sources/list` for paged operator review
-- `/api/admin/import-manifest/preview` and `/api/admin/import-manifest/record` for authorized manifest validation and recording
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `APP_DB_PATH` | Read-only catalog database | `tpb.sqlite` |
+| `APP_STATE_PATH` | Writable application state | `app_state.sqlite` |
+| `APP_BIND_ADDR` | Listen address | `127.0.0.1` |
+| `PORT` | Listen port | `8080` |
+| `ADMIN_PASSWORD` | Admin login password | unset |
+| `ADMIN_SESSION_SECRET` | HMAC session secret | random per process |
+| `APP_TLS_CERT_FILE` | Direct TLS certificate | unset |
+| `APP_TLS_KEY_FILE` | Direct TLS key | unset |
+| `APP_COOKIE_SECURE` | Secure cookies behind trusted TLS proxy | unset |
+| `APP_ALLOW_INSECURE_HTTP` | Explicit non-loopback HTTP override | unset |
+| `WHOP2P_HOME` | Local configuration directory | `~/.config/whop2p` |
+| `WHOP2P_URL` | Override URL used by `whop2p open` | derived from bind/port |
 
-## Product Notes
+`ADMIN_SESSION_SECRET` should be set to a stable random value. If it is
+omitted, a new secret is generated at startup and existing admin sessions are
+invalidated after restart.
 
-- Search is intentionally simple at the moment so the app stays easy to run cross-platform.
-- The catalog database remains read-only.
-- Any future ingestion work must be limited to datasets the operator is authorized to use.
+The server refuses plaintext HTTP on non-loopback addresses unless TLS is
+configured or `APP_ALLOW_INSECURE_HTTP=true` is explicitly set. Prefer a
+private overlay, SSH tunnel, or TLS reverse proxy.
+
+## Public routes
+
+- `/` — search UI
+- `/torrent/:id` — torrent detail and magnet action
+- `/healthz` — health check
+- `/api/stats` — catalog counts
+- `/api/categories` — category list
+- `/api/search` — search, sorting, and pagination
+- `/api/torrents/:id` — JSON detail and files
+
+Browse routes are intended for a private network or loopback deployment. Put
+authentication at the network edge if exposing the browse surface beyond the
+operator's machine.
+
+## Admin surface
+
+The admin panel is protected by a signed, server-revocable session cookie.
+
+- `/admin` — admin UI
+- `/api/admin/status` — health, counts, session, and external-client status
+- `/api/admin/audits` — paged audit inspection
+- `/api/admin/import-sources/*` — approved source records
+- `/api/admin/import-runs/*` — import run records
+- `/api/admin/import-manifests/*` — validated manifest records
+- `/api/admin/import-references` — record authorized magnet or `.torrent` metadata
+- `/api/admin/import-references/list` — list recorded metadata references
+
+### External reference import
+
+The admin UI includes an **Import External Reference** action with a Heroicon.
+It accepts:
+
+- `magnet:?xt=urn:btih:...` references with a valid v1 info hash
+- `https://.../*.torrent` URLs
+
+It records the reference and parsed metadata in app state. It does not fetch
+the URL, contact a tracker, invoke `aria2c`, or write to the read-only catalog.
+
+## Development
+
+```sh
+make test
+make vet
+make race
+make build
+```
+
+The local end-to-end test uses a synthetic Ubuntu metadata fixture:
+
+```sh
+./scripts/e2e.sh
+```
+
+It validates health, search, detail rendering, and magnet generation without
+contacting a tracker or downloading content.
+
+Container publishing to Harbor or another OCI registry uses Apple's `container`
+CLI:
+
+```sh
+container login harbor.example.com
+REGISTRY=harbor.example.com IMAGE=whop2p TAG=0.1.5 ./scripts/oci-publish.sh
+```
+
+## Repository layout
+
+```text
+cmd/server       CLI, setup, backup loading, HTTP entrypoint
+internal/app     routes, auth, templates, and handlers
+internal/catalog read-only catalog queries
+internal/state   app-owned SQLite state and audit data
+internal/importer manifest and external-reference validation
+deploy/macos     native launchd deployment
+deploy/ubuntu    native systemd deployment
+deploy/orchard   Apple container machine deployment
+scripts          E2E and OCI publishing helpers
+docs             release and testing notes
+```
+
+## Documentation
+
+- [`docs/TESTING.md`](docs/TESTING.md)
+- [`docs/RELEASING.md`](docs/RELEASING.md)
+- [`deploy/README.md`](deploy/README.md)
+- [`DESIGN.md`](DESIGN.md)
+
+## License
+
+A license has not yet been declared. Add one before distributing a release
+outside the project maintainers' private environment.

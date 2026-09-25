@@ -1,10 +1,8 @@
 package importer
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,8 +27,6 @@ type ValidationResult struct {
 	TotalBytes      int64
 	PreviewChecksum string
 }
-
-var ErrMissingManifest = errors.New("manifest is required")
 
 const (
 	DefaultMaxManifestFiles       = 256
@@ -156,28 +152,4 @@ func isWithinBase(baseDir, path string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// PreviewFileChecksum produces a stable sha256 for the first n lines of a file.
-// It is useful for confirming a manifest before doing a full ingest.
-func PreviewFileChecksum(path string, lines int) (string, error) {
-	if lines <= 0 {
-		return "", fmt.Errorf("lines must be positive")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	hash := sha256.New()
-	scanner := bufio.NewScanner(f)
-	for i := 0; i < lines && scanner.Scan(); i++ {
-		_, _ = hash.Write([]byte(scanner.Text()))
-		_, _ = hash.Write([]byte{'\n'})
-	}
-	if err := scanner.Err(); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }

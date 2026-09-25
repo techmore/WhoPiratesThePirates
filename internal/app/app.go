@@ -172,6 +172,8 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("/api/admin/import-validate", a.requireAdmin(a.handleAdminValidateImportManifest))
 	mux.HandleFunc("/api/admin/import-manifest/preview", a.requireAdmin(a.handleAdminPreviewValidatedManifest))
 	mux.HandleFunc("/api/admin/import-manifest/record", a.requireAdmin(a.handleAdminRecordValidatedManifest))
+	mux.HandleFunc("/api/admin/import-references", a.requireAdmin(a.handleAdminImportReferences))
+	mux.HandleFunc("/api/admin/import-references/list", a.requireAdmin(a.handleAdminImportReferencesList))
 	mux.HandleFunc("/api/admin/tor", a.requireAdmin(a.handleAdminTorUpdate))
 	return securityHeaders(http.MaxBytesHandler(mux, maxRequestBodyBytes))
 }
@@ -1132,6 +1134,39 @@ func (a *App) handleAdminPreviewValidatedManifest(w http.ResponseWriter, r *http
 	})
 }
 
+func (a *App) handleAdminImportReferences(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	parsed, err := importer.ParseExternalReference(r.FormValue("reference"))
+	if err != nil {
+		_ = a.state.Audit("import_reference_rejected", err.Error())
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.CreateImportReference(parsed.Kind, parsed.Reference, parsed.InfoHash, parsed.Name, strings.Join(parsed.Trackers, "\n"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("import_reference_recorded", fmt.Sprintf("kind=%s info_hash=%s", item.Kind, item.InfoHash))
+	writeJSON(w, map[string]any{"reference": item})
+}
+
+func (a *App) handleAdminImportReferencesList(w http.ResponseWriter, r *http.Request) {
+	items, err := a.state.ImportReferences(100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"items": items})
+}
+
 func (a *App) handleAdminRecordValidatedManifest(w http.ResponseWriter, r *http.Request) {
 	result, approvedBy, err := a.validateManifestRequest(r)
 	if err != nil {
@@ -1287,7 +1322,7 @@ func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")

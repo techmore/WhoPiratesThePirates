@@ -52,6 +52,16 @@ type ImportManifest struct {
 	CreatedAt       int64  `json:"createdAt"`
 }
 
+type ImportReference struct {
+	ID        int64  `json:"id"`
+	Kind      string `json:"kind"`
+	Reference string `json:"reference"`
+	InfoHash  string `json:"infoHash,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Trackers  string `json:"trackers,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
 type AdminSettings struct {
 	TorEnabled        bool   `json:"torEnabled"`
 	TorMode           string `json:"torMode"`
@@ -89,6 +99,7 @@ func ensureSchema(db *sql.DB) error {
 		`create table if not exists import_sources (id integer primary key autoincrement, name text not null, kind text not null, location text not null, enabled integer not null default 1, created_at integer not null)`,
 		`create table if not exists import_runs (id integer primary key autoincrement, source_id integer not null, status text not null, started_at integer not null, finished_at integer not null default 0, message text not null default '', checksum text not null default '', approved_ref text not null default '', foreign key(source_id) references import_sources(id))`,
 		`create table if not exists import_manifests (id integer primary key autoincrement, name text not null, approved_by text not null, base_dir text not null, checksum text not null, preview_checksum text not null, total_bytes integer not null, created_at integer not null)`,
+		`create table if not exists import_references (id integer primary key autoincrement, kind text not null, reference text not null, info_hash text not null default '', name text not null default '', trackers text not null default '', created_at integer not null)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -400,6 +411,45 @@ func (s *Store) ImportManifestTotals() (count int64, totalBytes int64, err error
 		return 0, 0, err
 	}
 	return count, totalBytes, nil
+}
+
+func (s *Store) CreateImportReference(kind, reference, infoHash, name, trackers string) (ImportReference, error) {
+	item := ImportReference{
+		Kind:      kind,
+		Reference: reference,
+		InfoHash:  infoHash,
+		Name:      name,
+		Trackers:  trackers,
+		CreatedAt: time.Now().Unix(),
+	}
+	result, err := s.db.Exec(`insert into import_references(kind, reference, info_hash, name, trackers, created_at) values(?, ?, ?, ?, ?, ?)`, item.Kind, item.Reference, item.InfoHash, item.Name, item.Trackers, item.CreatedAt)
+	if err != nil {
+		return ImportReference{}, err
+	}
+	item.ID, err = result.LastInsertId()
+	return item, err
+}
+
+func (s *Store) ImportReferences(limit int) ([]ImportReference, error) {
+	rows, err := s.db.Query(`select id, kind, reference, info_hash, name, trackers, created_at from import_references order by id desc limit ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ImportReference, 0, limit)
+	for rows.Next() {
+		var item ImportReference
+		if err := rows.Scan(&item.ID, &item.Kind, &item.Reference, &item.InfoHash, &item.Name, &item.Trackers, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) DeleteImportReference(id int64) error {
+	_, err := s.db.Exec(`delete from import_references where id = ?`, id)
+	return err
 }
 
 func (s *Store) DeleteImportManifest(id int64) error {

@@ -2155,6 +2155,46 @@ func seedCatalog(t *testing.T, path string) {
 	}
 }
 
+func TestAdminImportReferenceRecordsMagnetMetadataOnly(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"reference": []string{"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Ubuntu%2024.04&tr=udp%3A%2F%2Ftracker.example%3A80"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-references", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected import reference status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/admin/import-references/list", nil)
+	listReq.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	listRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("unexpected list status: %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Kind     string `json:"kind"`
+			InfoHash string `json:"infoHash"`
+			Name     string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Kind != "magnet" || payload.Items[0].InfoHash == "" || payload.Items[0].Name != "Ubuntu 24.04" {
+		t.Fatalf("unexpected import reference payload: %#v", payload)
+	}
+}
+
 func TestAdminLoginRejectsCrossOriginRequests(t *testing.T) {
 	a, _ := newAdminTestApp(t, testAdminPassword)
 	defer a.Close()
