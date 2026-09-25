@@ -2145,7 +2145,7 @@ func seedCatalog(t *testing.T, path string) {
 		`create table yts_movies (id integer primary key)`,
 		`create table yts_torrent_data (id integer primary key)`,
 		`insert into categories(id, name) values (1, 'Movies')`,
-		`insert into torrents(id, category, status, name, numFiles, size, seeders, leechers, username, added, description, imdb, language, textLanguage, infoHash) values (10, 1, 'ok', 'Test Torrent', 3, 1048576, 7, 2, 'alice', 1710000000, 'hello world', 'tt1234567', 'English', 'English', 'abcdef')`,
+		`insert into torrents(id, category, status, name, numFiles, size, seeders, leechers, username, added, description, imdb, language, textLanguage, infoHash) values (10, 1, 'ok', 'Test Torrent', 3, 1048576, 7, 2, 'alice', 1710000000, 'hello world', 'tt1234567', 'English', 'English', '0123456789abcdef0123456789abcdef01234567')`,
 		`insert into files(id, parentTorrentId, name, size) values (1, 10, 'file1.mkv', 1024), (2, 10, 'file2.srt', 2048)`,
 	}
 	for _, stmt := range stmts {
@@ -2244,6 +2244,34 @@ func TestSubtleConstantTimeAcceptsEqualValuesOnly(t *testing.T) {
 	}
 	if subtleConstantTime([]byte("secret"), []byte("different length")) || subtleConstantTime([]byte("secret"), []byte("wrong")) {
 		t.Fatal("expected unequal values to compare false")
+	}
+}
+
+func TestTorrentPageRendersValidatedMagnetLink(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/torrent/10", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected torrent page status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&amp;dn=Test") {
+		t.Fatalf("expected a validated magnet link in torrent page, got body=%s", body)
+	}
+	if !strings.Contains(body, "Open magnet") || !strings.Contains(body, "Copy magnet") {
+		t.Fatalf("expected magnet actions in torrent page, got body=%s", body)
+	}
+}
+
+func TestMagnetLinkRejectsInvalidInfoHashes(t *testing.T) {
+	if got := magnetLink("not-a-hash", "Ubuntu"); got != "" {
+		t.Fatalf("expected invalid info hash to be rejected, got %q", got)
+	}
+	if got := magnetLink("A", "Ubuntu"); got != "" {
+		t.Fatalf("expected short info hash to be rejected, got %q", got)
 	}
 }
 

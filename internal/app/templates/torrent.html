@@ -13,8 +13,12 @@
           <span class="pill">Added: {{.AddedHuman}}</span>
         </div>
         <div class="inline-actions" style="margin-top:12px;">
-          <a class="button-secondary" id="magnet" href="magnet:?xt=urn:btih:{{.InfoHash}}&dn={{urlquery .Name}}" target="_blank" rel="noopener noreferrer">Open magnet</a>
-          <button type="button" class="button-secondary" onclick="navigator.clipboard.writeText(document.getElementById('magnet').href)">Copy magnet</button>
+          {{if .Magnet}}
+            <a class="button-secondary" id="magnet" href="{{.Magnet}}" target="_blank" rel="noopener noreferrer">Open magnet</a>
+            <button type="button" class="button-secondary" onclick="navigator.clipboard.writeText(document.getElementById('magnet').href)">Copy magnet</button>
+          {{else}}
+            <span class="muted">Magnet unavailable: invalid info hash</span>
+          {{end}}
         </div>
       </div>
       <div class="grid">

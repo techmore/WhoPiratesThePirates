@@ -2,6 +2,7 @@
 internal/.DS_Store
 bin/
 dist/
+.tap/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

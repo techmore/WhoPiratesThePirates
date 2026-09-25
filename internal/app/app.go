@@ -202,6 +202,14 @@ func (a *App) handleTorrentPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	magnet := magnetLink(torrent.InfoHash, torrent.Name)
+	var magnetURL template.URL
+	if magnet != "" {
+		// The link is constructed from a validated info hash and an escaped
+		// display name; mark it safe so html/template does not replace the
+		// magnet: scheme with #ZgotmplZ.
+		magnetURL = template.URL(magnet)
+	}
 	if err := a.renderPage(w, "torrent", "torrent.html", map[string]any{
 		"Name":         torrent.Name,
 		"CategoryName": torrent.CategoryName,
@@ -213,6 +221,7 @@ func (a *App) handleTorrentPage(w http.ResponseWriter, r *http.Request) {
 		"Summary":      summarizeText(cleanText(deref(torrent.Description)), 280),
 		"Username":     torrent.Username,
 		"InfoHash":     torrent.InfoHash,
+		"Magnet":       magnetURL,
 		"Language":     deref(torrent.Language),
 		"IMDB":         deref(torrent.IMDB),
 		"Files":        files,
@@ -1471,6 +1480,40 @@ func validTorMode(mode string) bool {
 	default:
 		return false
 	}
+}
+
+func magnetLink(infoHash, name string) string {
+	infoHash = strings.TrimSpace(infoHash)
+	if !validInfoHash(infoHash) {
+		return ""
+	}
+	kind := "btih"
+	value := strings.ToLower(infoHash)
+	if len(infoHash) == 32 {
+		kind = "btih"
+		value = strings.ToUpper(infoHash)
+	}
+	return "magnet:?xt=urn:" + kind + ":" + value + "&dn=" + url.QueryEscape(name)
+}
+
+func validInfoHash(infoHash string) bool {
+	if len(infoHash) == 40 {
+		for _, r := range infoHash {
+			if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f') && !(r >= 'A' && r <= 'F') {
+				return false
+			}
+		}
+		return true
+	}
+	if len(infoHash) == 32 {
+		for _, r := range infoHash {
+			if !(r >= 'A' && r <= 'Z') && !(r >= '2' && r <= '7') {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func formatBytes(n float64) string {
