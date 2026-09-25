@@ -19,9 +19,25 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
-		fmt.Println(version)
-		return
+	if len(os.Args) == 2 {
+		switch os.Args[1] {
+		case "--version", "-version":
+			fmt.Println(version)
+			return
+		case "setup":
+			if err := runSetup(); err != nil {
+				log.Fatal(err)
+			}
+			return
+		case "open":
+			if err := runOpen(); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
+	}
+	if err := loadServiceEnv(); err != nil {
+		log.Printf("warning: could not load service environment: %v", err)
 	}
 
 	dbPath := os.Getenv("APP_DB_PATH")

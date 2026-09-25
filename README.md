@@ -63,6 +63,19 @@ The server is a single pure-Go binary and does not require Docker.
 - Homebrew releases will be available as `brew install techmore/tap/whop2p`.
 - Cross-compile release binaries with `make linux` and `make darwin`.
 
+After installation, initialize the local configuration and start the service:
+
+```sh
+whop2p setup
+brew services start whop2p
+whop2p open
+```
+
+`whop2p setup` creates a private configuration directory, an empty catalog, app
+state, and a mode-0600 service environment file. It never overwrites an
+existing catalog. Set `ADMIN_PASSWORD` in the generated `service.env` before
+using the admin surface.
+
 In every deployment, keep the catalog database read-only and keep app state in a
 separate writable database. The default bind address is loopback; use a private
 network or TLS reverse proxy for remote access.

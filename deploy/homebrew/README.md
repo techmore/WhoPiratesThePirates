@@ -24,8 +24,20 @@ Release checklist:
 5. Run `brew audit --strict --online` against the tap.
 6. Verify `brew install techmore/tap/whop2p` on a clean Apple Silicon Mac.
 
-The formula installs the binary and compatibility alias. It should never create
-or overwrite a user's catalog database during `brew install`.
+The formula installs the binary and compatibility alias. It also provides a
+Homebrew service definition for macOS. It should never create or overwrite a
+user's catalog database during `brew install`.
+
+After installation:
+
+```sh
+whop2p setup
+brew services start whop2p
+whop2p open
+```
+
+Set `ADMIN_PASSWORD` in the generated `~/.config/whop2p/service.env` before
+using the admin surface.
 
 See [`../../docs/RELEASING.md`](../../docs/RELEASING.md) for the full release
 checklist.

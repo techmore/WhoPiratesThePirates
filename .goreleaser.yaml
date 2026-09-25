@@ -43,6 +43,11 @@ brews:
     install: |
       bin.install "whop2p"
       bin.install_symlink "whop2p" => "who-pirates-the-pirates"
+    service: |
+      run [opt_bin/"whop2p"]
+      keep_alive true
+      working_dir Pathname(ENV["HOME"])
+      log_path "~/Library/Logs/whop2p.log"
     test: |
       system "#{bin}/whop2p", "--version"
     caveats: |

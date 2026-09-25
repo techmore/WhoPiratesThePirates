@@ -23,6 +23,27 @@ explicitly licensed to use. Keep tracker/network access out of automated CI;
 use a local fixture for deterministic tests and perform the real transfer
 manually.
 
+The E2E fixture is a synthetic metadata record. It does not add Ubuntu to a
+BitTorrent swarm, contact a tracker, or download content. A real P2P transfer
+test should be a separate manual, opt-in test because it depends on peers,
+network conditions, and content availability.
+
+## First-run commands
+
+```sh
+whop2p setup
+whop2p --version
+```
+
+`setup` creates a private `~/.config/whop2p` directory with an empty catalog,
+app state, and a mode-0600 `service.env`. It does not overwrite an existing
+catalog. On macOS, the release formula can then be started with:
+
+```sh
+brew services start whop2p
+whop2p open
+```
+
 ## OCI/Harbor publishing
 
 Harbor is an OCI registry, so it can store the image built by Apple's native
