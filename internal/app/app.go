@@ -508,6 +508,7 @@ func (a *App) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		"adminSessionEpoch":        s.AdminSessionEpoch,
 		"catalogHealthy":           catalogHealthy,
 		"stateHealthy":             stateHealthy,
+		"aria2":                    detectAria2(),
 		"importSources":            sources,
 		"importSourceCount":        sourceCount,
 		"importRuns":               runs,

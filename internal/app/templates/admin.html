@@ -428,7 +428,8 @@
               statusLogout.textContent = data.lastLogoutAt ? 'Last logout audit: ' + data.lastLogoutAt : 'Last logout audit: none';
               statusHealth.innerHTML = [
                 '<div class="kv"><span>Catalog DB</span><span class="muted">' + ((data.catalogHealthy ? 'healthy' : 'degraded')) + '</span></div>',
-                '<div class="kv"><span>State DB</span><span class="muted">' + ((data.stateHealthy ? 'healthy' : 'degraded')) + '</span></div>'
+                '<div class="kv"><span>State DB</span><span class="muted">' + ((data.stateHealthy ? 'healthy' : 'degraded')) + '</span></div>',
+                '<div class="kv"><span>External transfer client</span><span class="muted">' + (data.aria2 && data.aria2.installed ? 'aria2c detected' + (data.aria2.version ? ' · ' + data.aria2.version : '') : 'aria2c not detected') + '</span></div>'
               ].join('');
             }
             function syncTimer() {

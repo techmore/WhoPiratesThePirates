@@ -28,6 +28,10 @@ BitTorrent swarm, contact a tracker, or download content. A real P2P transfer
 test should be a separate manual, opt-in test because it depends on peers,
 network conditions, and content availability.
 
+The admin status panel can also report whether an external `aria2c` binary is
+available. This is detection only; the service never invokes aria2 or downloads
+content.
+
 ## First-run commands
 
 ```sh

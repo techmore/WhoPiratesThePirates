@@ -83,6 +83,11 @@ In every deployment, keep the catalog database read-only and keep app state in a
 separate writable database. The default bind address is loopback; use a private
 network or TLS reverse proxy for remote access.
 
+The admin status panel reports whether an external `aria2c` binary is available,
+but the service never invokes it or downloads content automatically. Use an
+external client for torrents you own or are authorized to use, then load the
+resulting catalog backup with `whop2p load-catalog`.
+
 Release and Homebrew tap instructions live in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Admin And Tor
