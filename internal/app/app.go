@@ -27,14 +27,19 @@ import (
 )
 
 type App struct {
-	catalog       *catalog.Catalog
-	state         *state.Store
-	adminPass     string
-	secret        []byte
-	secureCookies bool
-	loginAttempts map[string]loginAttempt
-	loginMu       sync.Mutex
-	embedded      map[string]*template.Template
+	catalog         *catalog.Catalog
+	catalogMu       sync.RWMutex
+	catalogPath     string
+	catalogName     string
+	catalogRevision uint64
+	version         string
+	state           *state.Store
+	adminPass       string
+	secret          []byte
+	secureCookies   bool
+	loginAttempts   map[string]loginAttempt
+	loginMu         sync.Mutex
+	embedded        map[string]*template.Template
 }
 
 const maxRequestBodyBytes int64 = 1 << 20
@@ -53,6 +58,7 @@ type loginAttempt struct {
 
 type AdminPageData struct {
 	state.AdminSettings
+	CatalogSources  []state.CatalogSource
 	ImportSources   []state.ImportSource
 	ImportRuns      []state.ImportRun
 	ImportManifests []state.ImportManifest
@@ -74,16 +80,35 @@ func New(dbPath, statePath string) (*App, error) {
 
 type Options struct {
 	SecureCookies bool
+	Version       string
 }
 
 func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
-	db, err := catalog.Open(dbPath)
+	st, err := state.Open(statePath)
 	if err != nil {
 		return nil, err
 	}
-	st, err := state.Open(statePath)
+
+	selectedPath := dbPath
+	selectedName := "Configured catalog"
+	active, err := st.ActiveCatalog()
 	if err != nil {
-		_ = db.Close()
+		_ = st.Close()
+		return nil, err
+	}
+	if strings.TrimSpace(active.Path) != "" {
+		if err := catalog.Validate(active.Path); err == nil {
+			selectedPath = active.Path
+			if strings.TrimSpace(active.Name) != "" {
+				selectedName = active.Name
+			}
+		} else {
+			_ = st.ClearActiveCatalog()
+		}
+	}
+	db, err := catalog.Open(selectedPath)
+	if err != nil {
+		_ = st.Close()
 		return nil, err
 	}
 
@@ -96,7 +121,11 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 			return nil, err
 		}
 	}
-	embedded, err := loadEmbeddedTemplates()
+	releaseVersion := strings.TrimSpace(options.Version)
+	if releaseVersion == "" {
+		releaseVersion = "dev"
+	}
+	embedded, err := loadEmbeddedTemplates(releaseVersion)
 	if err != nil {
 		_ = db.Close()
 		_ = st.Close()
@@ -104,13 +133,17 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 	}
 
 	return &App{
-		catalog:       db,
-		state:         st,
-		adminPass:     os.Getenv("ADMIN_PASSWORD"),
-		secret:        secret,
-		secureCookies: options.SecureCookies,
-		loginAttempts: make(map[string]loginAttempt),
-		embedded:      embedded,
+		catalog:         db,
+		catalogPath:     selectedPath,
+		catalogName:     selectedName,
+		catalogRevision: 1,
+		version:         releaseVersion,
+		state:           st,
+		adminPass:       os.Getenv("ADMIN_PASSWORD"),
+		secret:          secret,
+		secureCookies:   options.SecureCookies,
+		loginAttempts:   make(map[string]loginAttempt),
+		embedded:        embedded,
 	}, nil
 }
 
@@ -119,11 +152,14 @@ func (a *App) Close() error {
 		return nil
 	}
 	var errs []string
+	a.catalogMu.Lock()
 	if a.catalog != nil {
 		if err := a.catalog.Close(); err != nil {
 			errs = append(errs, err.Error())
 		}
+		a.catalog = nil
 	}
+	a.catalogMu.Unlock()
 	if a.state != nil {
 		if err := a.state.Close(); err != nil {
 			errs = append(errs, err.Error())
@@ -143,6 +179,8 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("/healthz", a.handleHealthz)
 	mux.HandleFunc("/api/stats", a.handleStats)
 	mux.HandleFunc("/api/categories", a.handleCategories)
+	mux.HandleFunc("/api/catalog-sources", a.handleCatalogSources)
+	mux.HandleFunc("/api/catalog-status", a.handleCatalogStatus)
 	mux.HandleFunc("/api/search", a.handleSearch)
 	mux.HandleFunc("/api/torrents/", a.handleTorrentDetail)
 	mux.HandleFunc("/api/admin/login", a.handleAdminLogin)
@@ -174,6 +212,11 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("/api/admin/import-manifest/record", a.requireAdmin(a.handleAdminRecordValidatedManifest))
 	mux.HandleFunc("/api/admin/import-references", a.requireAdmin(a.handleAdminImportReferences))
 	mux.HandleFunc("/api/admin/import-references/list", a.requireAdmin(a.handleAdminImportReferencesList))
+	mux.HandleFunc("/api/admin/catalog-sources", a.requireAdmin(a.handleAdminCatalogSources))
+	mux.HandleFunc("/api/admin/catalog-sources/update", a.requireAdmin(a.handleAdminUpdateCatalogSource))
+	mux.HandleFunc("/api/admin/catalog-sources/toggle", a.requireAdmin(a.handleAdminToggleCatalogSource))
+	mux.HandleFunc("/api/admin/catalog-sources/delete", a.requireAdmin(a.handleAdminDeleteCatalogSource))
+	mux.HandleFunc("/api/admin/catalog-sources/load", a.requireAdmin(a.handleAdminLoadCatalogSource))
 	mux.HandleFunc("/api/admin/tor", a.requireAdmin(a.handleAdminTorUpdate))
 	return securityHeaders(http.MaxBytesHandler(mux, maxRequestBodyBytes))
 }
@@ -244,6 +287,11 @@ func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	catalogSources, err := a.state.CatalogSources()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	sources, err := a.state.ImportSources()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -264,7 +312,7 @@ func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := a.renderPage(w, "admin", "admin.html", AdminPageData{AdminSettings: s, ImportSources: sources, ImportRuns: runs, ImportManifests: manifests, AuditEntries: audits}); err != nil {
+	if err := a.renderPage(w, "admin", "admin.html", AdminPageData{AdminSettings: s, CatalogSources: catalogSources, ImportSources: sources, ImportRuns: runs, ImportManifests: manifests, AuditEntries: audits}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -276,15 +324,20 @@ func templatePath(name string) string {
 	return filepath.Join(templateDir, name)
 }
 
-func loadEmbeddedTemplates() (map[string]*template.Template, error) {
+func templateFuncs(releaseVersion string) template.FuncMap {
+	return template.FuncMap{
+		"dict":     dict,
+		"list":     list,
+		"urlquery": url.QueryEscape,
+		"version":  func() string { return releaseVersion },
+	}
+}
+
+func loadEmbeddedTemplates(releaseVersion string) (map[string]*template.Template, error) {
 	pages := []string{"index.html", "torrent.html", "admin.html", "admin_login.html"}
 	loaded := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
-		builder := template.New(page).Funcs(template.FuncMap{
-			"dict":     dict,
-			"list":     list,
-			"urlquery": url.QueryEscape,
-		})
+		builder := template.New(page).Funcs(templateFuncs(releaseVersion))
 		tpl, err := builder.ParseFS(templateFS, "templates/"+page, "templates/base.html")
 		if err != nil {
 			return nil, err
@@ -303,11 +356,7 @@ func (a *App) renderPage(w http.ResponseWriter, name, page string, data any) err
 		return tpl.ExecuteTemplate(w, "base", data)
 	}
 
-	builder := template.New(name).Funcs(template.FuncMap{
-		"dict":     dict,
-		"list":     list,
-		"urlquery": url.QueryEscape,
-	})
+	builder := template.New(name).Funcs(templateFuncs(a.version))
 	tpl, err := builder.ParseFiles(templatePath(page), templatePath("base.html"))
 	if err != nil {
 		return err
@@ -316,15 +365,15 @@ func (a *App) renderPage(w http.ResponseWriter, name, page string, data any) err
 }
 
 func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if a.catalog.Healthy() != nil || a.state.Healthy() != nil {
+	if a.catalogHealthy() != nil || a.state.Healthy() != nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok", "version": a.version})
 }
 
 func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := a.catalog.Stats()
+	stats, err := a.catalogStats()
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -333,12 +382,44 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleCategories(w http.ResponseWriter, r *http.Request) {
-	items, err := a.catalog.Categories()
+	items, err := a.catalogCategories()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"items": items})
+}
+
+type catalogSourceLink struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Magnet string `json:"magnet"`
+}
+
+func (a *App) handleCatalogSources(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sources, err := a.state.EnabledCatalogSources()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	links := make([]catalogSourceLink, 0, len(sources))
+	for _, source := range sources {
+		links = append(links, catalogSourceLink{ID: source.ID, Name: source.Name, Magnet: source.Magnet})
+	}
+	writeJSON(w, map[string]any{"items": links})
+}
+
+func (a *App) handleCatalogStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name, _, revision := a.catalogInfo()
+	writeJSON(w, map[string]any{"name": name, "revision": revision})
 }
 
 func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +429,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	sortDir := strings.TrimSpace(r.URL.Query().Get("dir"))
 	limit := clampInt(queryInt(r, "limit", 100), 1, 100)
 	offset := clampInt(queryInt(r, "offset", 0), 0, 1000000)
-	items, total, err := a.catalog.SearchPage(q, category, sortField, sortDir, limit, offset)
+	items, total, err := a.catalogSearchPage(q, category, sortField, sortDir, limit, offset)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -455,8 +536,14 @@ func (a *App) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	catalogHealthy := a.catalog.Healthy() == nil
+	catalogHealthy := a.catalogHealthy() == nil
 	stateHealthy := a.state.Healthy() == nil
+	catalogName, catalogPath, catalogRevision := a.catalogInfo()
+	catalogSourceCount, err := a.state.CatalogSourceTotals()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	runs, err := a.state.ImportRuns(10)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -507,8 +594,13 @@ func (a *App) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"settings":                 s,
+		"version":                  a.version,
 		"adminSessionEpoch":        s.AdminSessionEpoch,
 		"catalogHealthy":           catalogHealthy,
+		"catalogName":              catalogName,
+		"catalogPath":              catalogPath,
+		"catalogRevision":          catalogRevision,
+		"catalogSourceCount":       catalogSourceCount,
 		"stateHealthy":             stateHealthy,
 		"aria2":                    detectAria2(),
 		"importSources":            sources,
@@ -1167,6 +1259,228 @@ func (a *App) handleAdminImportReferencesList(w http.ResponseWriter, r *http.Req
 	writeJSON(w, map[string]any{"items": items})
 }
 
+func (a *App) handleAdminCatalogSources(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		sources, err := a.state.CatalogSources()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"items": sources})
+	case http.MethodPost:
+		name, magnet, catalogPath, enabled, err := parseCatalogSourceForm(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.state.CreateCatalogSource(name, magnet, catalogPath, enabled); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = a.state.Audit("catalog_source_create", name)
+		if r.FormValue("load_now") != "" && catalogPath != "" {
+			loadPath, err := filepath.Abs(catalogPath)
+			if err != nil {
+				_ = a.state.Audit("catalog_load_rejected", fmt.Sprintf("name=%s path=%s error=%v", name, catalogPath, err))
+				http.Error(w, "invalid catalog path", http.StatusBadRequest)
+				return
+			}
+			if err := a.replaceCatalog(loadPath, name); err != nil {
+				_ = a.state.Audit("catalog_load_rejected", fmt.Sprintf("name=%s path=%s error=%v", name, loadPath, err))
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			_ = a.state.Audit("catalog_source_loaded_on_create", fmt.Sprintf("name=%s path=%s", name, loadPath))
+		}
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *App) handleAdminUpdateCatalogSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	name, magnet, catalogPath, _, err := parseCatalogSourceForm(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := a.state.UpdateCatalogSource(id, name, magnet, catalogPath); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("catalog_source_update", fmt.Sprintf("id=%d", id))
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) handleAdminToggleCatalogSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	enabled := r.FormValue("enabled") == "1"
+	if err := a.state.SetCatalogSourceEnabled(id, enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("catalog_source_toggle", fmt.Sprintf("id=%d enabled=%t", id, enabled))
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) handleAdminDeleteCatalogSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	item, err := a.state.CatalogSource(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.state.DeleteCatalogSource(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("catalog_source_delete", fmt.Sprintf("id=%d name=%s", id, item.Name))
+	writeJSON(w, map[string]any{"deleted": true, "id": id})
+}
+
+func (a *App) handleAdminLoadCatalogSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	sourceIDValue := strings.TrimSpace(r.FormValue("source_id"))
+	pathValue := strings.TrimSpace(r.FormValue("catalog_path"))
+	var source state.CatalogSource
+	var err error
+	if sourceIDValue != "" {
+		if pathValue != "" {
+			http.Error(w, "choose a configured source or enter a direct catalog path, not both", http.StatusBadRequest)
+			return
+		}
+		sourceID, parseErr := strconv.ParseInt(sourceIDValue, 10, 64)
+		if parseErr != nil || sourceID <= 0 {
+			http.Error(w, "invalid catalog source id", http.StatusBadRequest)
+			return
+		}
+		source, err = a.state.CatalogSource(sourceID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				http.NotFound(w, r)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		pathValue = strings.TrimSpace(source.CatalogPath)
+		if pathValue == "" {
+			http.Error(w, "selected catalog source has no local database path; download the authorized backup and save its path first", http.StatusBadRequest)
+			return
+		}
+	} else if pathValue == "" {
+		http.Error(w, "catalog path or source id is required", http.StatusBadRequest)
+		return
+	}
+
+	pathValue, err = filepath.Abs(pathValue)
+	if err != nil {
+		http.Error(w, "invalid catalog path", http.StatusBadRequest)
+		return
+	}
+	name := "Direct catalog path"
+	if source.ID > 0 {
+		name = source.Name
+	}
+	if err := a.replaceCatalog(pathValue, name); err != nil {
+		_ = a.state.Audit("catalog_load_rejected", fmt.Sprintf("name=%s path=%s error=%v", name, pathValue, err))
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = a.state.Audit("catalog_loaded", fmt.Sprintf("name=%s path=%s", name, pathValue))
+	stats, err := a.catalogStats()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"loaded": true,
+		"source": map[string]any{
+			"id":   source.ID,
+			"name": name,
+		},
+		"catalog": map[string]any{
+			"path":  pathValue,
+			"stats": stats,
+		},
+	})
+}
+
+func parseCatalogSourceForm(r *http.Request) (string, string, string, bool, error) {
+	if r.Method != http.MethodPost {
+		return "", "", "", false, fmt.Errorf("method not allowed")
+	}
+	if err := r.ParseForm(); err != nil {
+		return "", "", "", false, fmt.Errorf("invalid form")
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	magnet := strings.TrimSpace(r.FormValue("magnet"))
+	catalogPath := strings.TrimSpace(r.FormValue("catalog_path"))
+	if name == "" {
+		return "", "", "", false, fmt.Errorf("name is required")
+	}
+	if magnet != "" {
+		parsed, err := importer.ParseExternalReference(magnet)
+		if err != nil || parsed.Kind != "magnet" {
+			return "", "", "", false, fmt.Errorf("catalog source magnet is invalid")
+		}
+		magnet = parsed.Reference
+	}
+	if magnet == "" && catalogPath == "" {
+		return "", "", "", false, fmt.Errorf("provide a magnet link, a local catalog path, or both")
+	}
+	return name, magnet, catalogPath, r.FormValue("enabled") != "", nil
+}
+
 func (a *App) handleAdminRecordValidatedManifest(w http.ResponseWriter, r *http.Request) {
 	result, approvedBy, err := a.validateManifestRequest(r)
 	if err != nil {
@@ -1294,7 +1608,84 @@ func (a *App) handleAdminTorUpdate(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
+func (a *App) catalogHealthy() error {
+	a.catalogMu.RLock()
+	defer a.catalogMu.RUnlock()
+	if a.catalog == nil {
+		return errors.New("catalog is unavailable")
+	}
+	return a.catalog.Healthy()
+}
+
+func (a *App) catalogStats() (catalog.Stats, error) {
+	a.catalogMu.RLock()
+	defer a.catalogMu.RUnlock()
+	if a.catalog == nil {
+		return catalog.Stats{}, errors.New("catalog is unavailable")
+	}
+	return a.catalog.Stats()
+}
+
+func (a *App) catalogCategories() ([]catalog.Category, error) {
+	a.catalogMu.RLock()
+	defer a.catalogMu.RUnlock()
+	if a.catalog == nil {
+		return nil, errors.New("catalog is unavailable")
+	}
+	return a.catalog.Categories()
+}
+
+func (a *App) catalogSearchPage(q, category, sortField, sortDir string, limit, offset int) ([]catalog.Torrent, int64, error) {
+	a.catalogMu.RLock()
+	defer a.catalogMu.RUnlock()
+	if a.catalog == nil {
+		return nil, 0, errors.New("catalog is unavailable")
+	}
+	return a.catalog.SearchPage(q, category, sortField, sortDir, limit, offset)
+}
+
+func (a *App) catalogInfo() (string, string, uint64) {
+	a.catalogMu.RLock()
+	defer a.catalogMu.RUnlock()
+	return a.catalogName, a.catalogPath, a.catalogRevision
+}
+
+func (a *App) replaceCatalog(path, name string) error {
+	if err := catalog.Validate(path); err != nil {
+		return fmt.Errorf("catalog validation failed: %w", err)
+	}
+	next, err := catalog.Open(path)
+	if err != nil {
+		return fmt.Errorf("open catalog: %w", err)
+	}
+	if _, err := next.Stats(); err != nil {
+		_ = next.Close()
+		return fmt.Errorf("catalog is missing a queryable table: %w", err)
+	}
+	if err := a.state.SetActiveCatalog(name, path); err != nil {
+		_ = next.Close()
+		return fmt.Errorf("persist active catalog: %w", err)
+	}
+
+	a.catalogMu.Lock()
+	old := a.catalog
+	a.catalog = next
+	a.catalogPath = path
+	a.catalogName = name
+	a.catalogRevision++
+	a.catalogMu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	return nil
+}
+
 func (a *App) loadTorrentPageData(id int64) (catalog.Torrent, []catalog.TorrentFile, string, error) {
+	a.catalogMu.RLock()
+	defer a.catalogMu.RUnlock()
+	if a.catalog == nil {
+		return catalog.Torrent{}, nil, "", errors.New("catalog is unavailable")
+	}
 	t, categoryName, err := a.catalog.Torrent(id)
 	if err != nil {
 		return catalog.Torrent{}, nil, "", err

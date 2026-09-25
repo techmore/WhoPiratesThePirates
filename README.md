@@ -17,6 +17,8 @@ is also installed.
 - Browse torrent detail pages and file listings
 - Render validated BitTorrent v1 magnet links
 - Load a validated local SQLite catalog backup
+- Publish approved catalog-backup magnets in a customer dropdown
+- Switch the running browser to a validated local backup from the admin panel
 - Run a private admin surface with audit logging
 - Record operator-authorized magnet or `.torrent` references as metadata
 - Detect whether an external `aria2c` binary is available
@@ -50,6 +52,12 @@ whop2p --version
 make build
 ./bin/whop2p --version
 ```
+
+Builds derive their displayed release from the current Git tag and commit
+(for example, `v0.1.6-dirty` for a tagged worktree with local changes). To
+label a local build explicitly, use `make build VERSION=v0.1.7`. Tagged
+GoReleaser releases inject the tag automatically. The release is shown in the
+web UI header and is also returned by `/healthz` and `/api/admin/status`.
 
 ### macOS native service
 
@@ -143,13 +151,31 @@ The loader:
 
 1. Verifies the file is a regular SQLite database.
 2. Runs `PRAGMA integrity_check`.
-3. Verifies `torrents`, `files`, and `categories` exist.
+3. Verifies the catalog tables used by the browser exist.
 4. Rejects an empty catalog.
 5. Backs up the current catalog.
 6. Atomically installs the replacement.
 
 The catalog remains read-only after installation. App-owned state is written
 only to `app_state.sqlite`.
+
+### Recovery catalog links
+
+Admins can open **Catalog Recovery Sources** under `/admin` to save an
+approved magnet link and, when the backup has been recovered locally, its
+SQLite path. Enabled magnets appear in the **Authorized catalog backups**
+dropdown on the browse page so customers can copy or open the link in an
+approved recovery client.
+
+The server does not fetch magnet content or invoke a torrent client. After an
+authorized client has produced a local SQLite backup, an admin can select its
+configured source—or enter the local path directly—and choose **Validate and
+Load Catalog**. When a local path is provided while adding a recovery source,
+the checked **Validate and load immediately** option performs that validation
+and live load automatically. The running search UI detects the catalog change,
+refreshes its counts/categories/results, and remembers the selection across
+service restarts while the recovered file remains valid; the source database
+is never modified.
 
 ## Environment
 
@@ -183,6 +209,8 @@ private overlay, SSH tunnel, or TLS reverse proxy.
 - `/healthz` — health check
 - `/api/stats` — catalog counts
 - `/api/categories` — category list
+- `/api/catalog-sources` — enabled customer-facing recovery magnets
+- `/api/catalog-status` — active catalog revision for automatic browse refresh
 - `/api/search` — search, sorting, and pagination
 - `/api/torrents/:id` — JSON detail and files
 
@@ -202,6 +230,8 @@ The admin panel is protected by a signed, server-revocable session cookie.
 - `/api/admin/import-manifests/*` — validated manifest records
 - `/api/admin/import-references` — record authorized magnet or `.torrent` metadata
 - `/api/admin/import-references/list` — list recorded metadata references
+- `/api/admin/catalog-sources` — manage recovery catalog labels, magnets, and local paths
+- `/api/admin/catalog-sources/load` — validate and live-load a local catalog backup
 
 ### External reference import
 

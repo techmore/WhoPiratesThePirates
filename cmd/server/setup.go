@@ -17,7 +17,7 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
-
+	"who-pirates-the-pirates/internal/catalog"
 	"who-pirates-the-pirates/internal/state"
 )
 
@@ -159,44 +159,7 @@ func runLoadCatalog(source string) error {
 }
 
 func validateCatalog(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("not a regular file: %s", path)
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	var integrity string
-	if err := db.QueryRow(`pragma integrity_check`).Scan(&integrity); err != nil {
-		return err
-	}
-	if integrity != "ok" {
-		return fmt.Errorf("sqlite integrity check returned %q", integrity)
-	}
-	for _, table := range []string{"torrents", "files", "categories"} {
-		var name string
-		err := db.QueryRow(`select name from sqlite_master where type = 'table' and name = ?`, table).Scan(&name)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("required table %q is missing", table)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	var torrents int64
-	if err := db.QueryRow(`select count(*) from torrents`).Scan(&torrents); err != nil {
-		return err
-	}
-	if torrents == 0 {
-		return fmt.Errorf("catalog contains no torrents")
-	}
-	return nil
+	return catalog.Validate(path)
 }
 
 func runOpen() error {

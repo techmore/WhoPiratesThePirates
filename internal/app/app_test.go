@@ -1676,6 +1676,47 @@ func TestEmbeddedTemplatesIgnoreWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestReleaseVersionIsDisplayedAndReported(t *testing.T) {
+	t.Setenv("ADMIN_PASSWORD", testAdminPassword)
+	t.Setenv("ADMIN_SESSION_SECRET", testAdminSessionSecret)
+	catalogPath := filepath.Join(t.TempDir(), "catalog.sqlite")
+	statePath := filepath.Join(t.TempDir(), "state.sqlite")
+	seedCatalog(t, catalogPath)
+
+	a, err := NewWithOptions(catalogPath, statePath, Options{Version: "v9.9.9-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	pageReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	pageRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(pageRec, pageReq)
+	if pageRec.Code != http.StatusOK {
+		t.Fatalf("unexpected page status: %d body=%s", pageRec.Code, pageRec.Body.String())
+	}
+	if !strings.Contains(pageRec.Body.String(), "Release v9.9.9-test") {
+		t.Fatalf("expected release version in UI header, body=%s", pageRec.Body.String())
+	}
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(healthRec, healthReq)
+	if healthRec.Code != http.StatusOK {
+		t.Fatalf("unexpected health status: %d body=%s", healthRec.Code, healthRec.Body.String())
+	}
+	var healthPayload struct {
+		Status  string `json:"status"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(healthRec.Body.Bytes(), &healthPayload); err != nil {
+		t.Fatal(err)
+	}
+	if healthPayload.Status != "ok" || healthPayload.Version != "v9.9.9-test" {
+		t.Fatalf("unexpected health payload: %#v", healthPayload)
+	}
+}
+
 func TestAdminAuditDetailEndpointReturnsItem(t *testing.T) {
 	a, statePath := newAdminTestApp(t, testAdminPassword)
 	defer a.Close()
@@ -2192,6 +2233,247 @@ func TestAdminImportReferenceRecordsMagnetMetadataOnly(t *testing.T) {
 	}
 	if len(payload.Items) != 1 || payload.Items[0].Kind != "magnet" || payload.Items[0].InfoHash == "" || payload.Items[0].Name != "Ubuntu 24.04" {
 		t.Fatalf("unexpected import reference payload: %#v", payload)
+	}
+}
+
+func TestCatalogSourcesPublicEndpointReturnsEnabledMagnetsOnly(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	if err := a.state.CreateCatalogSource("Primary backup", "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", "/private/primary.sqlite", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateCatalogSource("Hidden backup", "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01", "/private/hidden.sqlite", false); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog-sources", nil)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Name        string `json:"name"`
+			Magnet      string `json:"magnet"`
+			CatalogPath string `json:"catalogPath"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Name != "Primary backup" || payload.Items[0].Magnet == "" || payload.Items[0].CatalogPath != "" {
+		t.Fatalf("unexpected public catalog source payload: %#v", payload)
+	}
+}
+
+func TestAdminCatalogSourceLoadSwapsReadOnlyCatalog(t *testing.T) {
+	a, configuredPath, statePath := newTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	replacementPath := filepath.Join(t.TempDir(), "recovered.sqlite")
+	seedCatalog(t, replacementPath)
+	db, err := sql.Open("sqlite", replacementPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("update torrents set name = 'Recovered Catalog Item'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateCatalogSource("Recovered backup", "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", replacementPath, true); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := a.state.CatalogSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{"source_id": []string{strconv.FormatInt(sources[0].ID, 10)}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-sources/load", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected load status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var loadPayload struct {
+		Loaded bool `json:"loaded"`
+		Source struct {
+			Name string `json:"name"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &loadPayload); err != nil {
+		t.Fatal(err)
+	}
+	if !loadPayload.Loaded || loadPayload.Source.Name != "Recovered backup" {
+		t.Fatalf("unexpected load payload: %#v", loadPayload)
+	}
+
+	searchReq := httptest.NewRequest(http.MethodGet, "/api/search?q=Recovered+Catalog", nil)
+	searchRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(searchRec, searchReq)
+	if searchRec.Code != http.StatusOK {
+		t.Fatalf("unexpected search status: %d body=%s", searchRec.Code, searchRec.Body.String())
+	}
+	var searchPayload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(searchRec.Body.Bytes(), &searchPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(searchPayload.Items) != 1 || searchPayload.Items[0].Name != "Recovered Catalog Item" {
+		t.Fatalf("expected search to use recovered catalog, got %#v", searchPayload)
+	}
+
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(configuredPath, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	restartedSearchReq := httptest.NewRequest(http.MethodGet, "/api/search?q=Recovered+Catalog", nil)
+	restartedSearchRec := httptest.NewRecorder()
+	restarted.Router().ServeHTTP(restartedSearchRec, restartedSearchReq)
+	if restartedSearchRec.Code != http.StatusOK {
+		t.Fatalf("unexpected restarted search status: %d body=%s", restartedSearchRec.Code, restartedSearchRec.Body.String())
+	}
+	var restartedSearchPayload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(restartedSearchRec.Body.Bytes(), &restartedSearchPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(restartedSearchPayload.Items) != 1 || restartedSearchPayload.Items[0].Name != "Recovered Catalog Item" {
+		t.Fatalf("expected active catalog to persist across restart, got %#v", restartedSearchPayload)
+	}
+}
+
+func TestAdminCatalogSourceLoadRejectsInvalidCatalogWithoutSwap(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	invalidPath := filepath.Join(t.TempDir(), "invalid.sqlite")
+	if err := os.WriteFile(invalidPath, []byte("not a sqlite catalog"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"catalog_path": []string{invalidPath}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-sources/load", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid catalog to be rejected, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	searchReq := httptest.NewRequest(http.MethodGet, "/api/search?q=Test+Torrent", nil)
+	searchRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(searchRec, searchReq)
+	if searchRec.Code != http.StatusOK {
+		t.Fatalf("unexpected search status: %d body=%s", searchRec.Code, searchRec.Body.String())
+	}
+	var searchPayload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(searchRec.Body.Bytes(), &searchPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(searchPayload.Items) != 1 || searchPayload.Items[0].Name != "Test Torrent" {
+		t.Fatalf("invalid load should leave the current catalog active, got %#v", searchPayload)
+	}
+}
+
+func TestAdminCatalogSourceCreateLoadsLocalCatalogAndPublishesRevision(t *testing.T) {
+	a, _, _ := newTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	replacementPath := filepath.Join(t.TempDir(), "recovered-on-create.sqlite")
+	seedCatalog(t, replacementPath)
+	db, err := sql.Open("sqlite", replacementPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("update torrents set name = 'Recovered on Create'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"name":         []string{"Recovered on create"},
+		"magnet":       []string{"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"},
+		"catalog_path": []string{replacementPath},
+		"enabled":      []string{"1"},
+		"load_now":     []string{"1"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-sources", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("unexpected create status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	searchReq := httptest.NewRequest(http.MethodGet, "/api/search?q=Recovered+on+Create", nil)
+	searchRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(searchRec, searchReq)
+	if searchRec.Code != http.StatusOK {
+		t.Fatalf("unexpected search status: %d body=%s", searchRec.Code, searchRec.Body.String())
+	}
+	var searchPayload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(searchRec.Body.Bytes(), &searchPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(searchPayload.Items) != 1 || searchPayload.Items[0].Name != "Recovered on Create" {
+		t.Fatalf("expected create flow to activate recovered catalog, got %#v", searchPayload)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/catalog-status", nil)
+	statusRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("unexpected catalog status: %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var statusPayload struct {
+		Name     string `json:"name"`
+		Revision uint64 `json:"revision"`
+	}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusPayload); err != nil {
+		t.Fatal(err)
+	}
+	if statusPayload.Name != "Recovered on create" || statusPayload.Revision < 2 {
+		t.Fatalf("unexpected catalog status payload: %#v", statusPayload)
 	}
 }
 

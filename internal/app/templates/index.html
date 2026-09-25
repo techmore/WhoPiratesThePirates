@@ -16,6 +16,24 @@
       <button onclick="search(0)">Search</button>
     </div>
 
+    <div class="card" id="catalog-sources" style="margin-top:12px;padding:14px 16px;">
+      <div class="panel-head" style="margin-bottom:10px;">
+        <div>
+          <div class="muted section-eyebrow">Recovery links</div>
+          <h2 class="section-title section-title-small" style="margin:0;">Authorized catalog backups</h2>
+          <div class="muted">Choose a configured magnet to copy or open in your approved recovery client. This browser does not fetch the backup.</div>
+        </div>
+      </div>
+      <div class="inline-actions">
+        <select id="catalog-source-select" aria-label="Recovery catalog backup" style="min-width:260px;flex:1;">
+          <option value="">Loading recovery links...</option>
+        </select>
+        <button type="button" id="catalog-source-copy" class="button-secondary" style="width:auto;" disabled>Copy magnet</button>
+        <a id="catalog-source-open" class="button-secondary" href="#" style="width:auto;display:inline-flex;align-items:center;justify-content:center;pointer-events:none;opacity:.5;" aria-disabled="true">Open magnet</a>
+      </div>
+      <div id="catalog-source-status" class="muted" style="margin-top:8px;"></div>
+    </div>
+
     <div class="filters" id="categories"></div>
     <div class="stats" id="stats"></div>
     <div id="view-status" class="view-status">
@@ -59,6 +77,8 @@
     let currentDir = 'desc';
     let currentSortLabel = 'Curated';
     let currentTotal = 0;
+    let catalogRevision = null;
+    let catalogRefreshInFlight = false;
     async function loadStats() {
       const stats = await fetch('/api/stats').then(r => r.json());
       const order = ['torrents', 'files', 'categories', 'yts_movies', 'yts_torrent_data'];
@@ -169,6 +189,72 @@
     }
     function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
     function formatSize(size) { return size >= 1024*1024*1024 ? (size/1024/1024/1024).toFixed(2) + ' GB' : size >= 1024*1024 ? (size/1024/1024).toFixed(2) + ' MB' : (size/1024).toFixed(2) + ' KB'; }
-    loadStats(); loadCategories(); updateHeaderSortState(); search(0);
+    async function loadCatalogSources() {
+      const select = document.getElementById('catalog-source-select');
+      const copyButton = document.getElementById('catalog-source-copy');
+      const openLink = document.getElementById('catalog-source-open');
+      const status = document.getElementById('catalog-source-status');
+      if (!select || !copyButton || !openLink || !status) return;
+      try {
+        const response = await fetch('/api/catalog-sources');
+        if (!response.ok) throw new Error('unable to load recovery links');
+        const data = await response.json();
+        const sources = data.items || [];
+        const byID = new Map(sources.map(source => [String(source.id), source]));
+        select.innerHTML = sources.length
+          ? '<option value="">Choose a recovery catalog...</option>' + sources.map(source => '<option value="' + source.id + '">' + escapeHtml(source.name) + '</option>').join('')
+          : '<option value="">No recovery links configured</option>';
+        function syncSource() {
+          const source = byID.get(select.value);
+          const enabled = Boolean(source && source.magnet);
+          copyButton.disabled = !enabled;
+          openLink.href = enabled ? source.magnet : '#';
+          openLink.style.pointerEvents = enabled ? 'auto' : 'none';
+          openLink.style.opacity = enabled ? '1' : '.5';
+          openLink.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+          status.textContent = enabled ? 'Selected: ' + source.name : (sources.length ? 'Select a recovery catalog to copy its magnet.' : 'An administrator can add recovery links from the admin panel.');
+        }
+        select.addEventListener('change', syncSource);
+        copyButton.addEventListener('click', async function() {
+          const source = byID.get(select.value);
+          if (!source) return;
+          try {
+            await navigator.clipboard.writeText(source.magnet);
+            status.textContent = 'Magnet copied for ' + source.name + '.';
+          } catch (error) {
+            status.textContent = 'Copy failed. Use Open magnet or copy the link from your client.';
+          }
+        });
+        syncSource();
+      } catch (error) {
+        select.innerHTML = '<option value="">Recovery links unavailable</option>';
+        status.textContent = 'Recovery links could not be loaded.';
+      }
+    }
+    async function loadCatalogStatus() {
+      try {
+        const response = await fetch('/api/catalog-status', {cache: 'no-store'});
+        if (!response.ok) return;
+        const data = await response.json();
+        const revision = Number(data.revision);
+        if (!Number.isFinite(revision)) return;
+        if (catalogRevision === null) {
+          catalogRevision = revision;
+          return;
+        }
+        if (revision === catalogRevision || catalogRefreshInFlight) return;
+        catalogRevision = revision;
+        catalogRefreshInFlight = true;
+        await Promise.all([loadStats(), loadCategories()]);
+        await search(0);
+        updateViewStatus('Catalog refreshed to ' + (data.name || 'the active catalog') + '.');
+      } catch (error) {
+        // A transient refresh failure should not interrupt browsing.
+      } finally {
+        catalogRefreshInFlight = false;
+      }
+    }
+    loadStats(); loadCategories(); loadCatalogSources(); loadCatalogStatus(); updateHeaderSortState(); search(0);
+    setInterval(loadCatalogStatus, 5000);
   </script>
 {{end}}

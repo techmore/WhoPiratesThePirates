@@ -3,6 +3,12 @@
 The project publishes a pure-Go server binary named `whop2p`, with a
 `who-pirates-the-pirates` compatibility alias.
 
+The release tag is injected into `main.version` by GoReleaser. The same value
+is passed into the application, shown in the web UI header as `Release ...`,
+returned by `/healthz` and `/api/admin/status`, and printed by `whop2p
+--version`. Local Make builds derive a comparable value from Git; use
+`make build VERSION=vX.Y.Z` when an explicit local label is needed.
+
 ## One-time GitHub setup
 
 1. Create a public repository named `techmore/homebrew-tap` with a `Formula`

@@ -102,6 +102,66 @@ func TestStateStore(t *testing.T) {
 		t.Fatalf("unexpected source totals: %d", sourceCount)
 	}
 
+	if err := st.CreateCatalogSource("Primary recovery", "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", "/backups/catalog.sqlite", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateCatalogSource("Hidden recovery", "", "/backups/hidden.sqlite", false); err != nil {
+		t.Fatal(err)
+	}
+	catalogSources, err := st.CatalogSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalogSources) != 2 || catalogSources[0].Name != "Hidden recovery" || catalogSources[1].Magnet == "" {
+		t.Fatalf("unexpected catalog sources: %#v", catalogSources)
+	}
+	enabledCatalogSources, err := st.EnabledCatalogSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enabledCatalogSources) != 1 || enabledCatalogSources[0].Name != "Primary recovery" {
+		t.Fatalf("unexpected enabled catalog sources: %#v", enabledCatalogSources)
+	}
+	if err := st.UpdateCatalogSource(catalogSources[0].ID, "Hidden updated", "", "/backups/hidden-new.sqlite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetCatalogSourceEnabled(catalogSources[0].ID, true); err != nil {
+		t.Fatal(err)
+	}
+	updatedCatalogSource, err := st.CatalogSource(catalogSources[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedCatalogSource.Name != "Hidden updated" || !updatedCatalogSource.Enabled || updatedCatalogSource.CatalogPath != "/backups/hidden-new.sqlite" {
+		t.Fatalf("unexpected updated catalog source: %#v", updatedCatalogSource)
+	}
+	if err := st.DeleteCatalogSource(catalogSources[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CatalogSource(catalogSources[0].ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected deleted catalog source lookup to fail, got %v", err)
+	}
+	if err := st.SetActiveCatalog("Primary recovery", "/backups/catalog.sqlite"); err != nil {
+		t.Fatal(err)
+	}
+	activeCatalog, err := st.ActiveCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activeCatalog.Name != "Primary recovery" || activeCatalog.Path != "/backups/catalog.sqlite" {
+		t.Fatalf("unexpected active catalog: %#v", activeCatalog)
+	}
+	if err := st.ClearActiveCatalog(); err != nil {
+		t.Fatal(err)
+	}
+	activeCatalog, err = st.ActiveCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activeCatalog.Name != "" || activeCatalog.Path != "" {
+		t.Fatalf("expected active catalog to be cleared, got %#v", activeCatalog)
+	}
+
 	if err := st.CreateImportRun(sources[0].ID, "queued", "created for test", "abc123", "approved/ref"); err != nil {
 		t.Fatal(err)
 	}

@@ -86,6 +86,7 @@ func main() {
 
 	svc, err := app.NewWithOptions(dbPath, statePath, app.Options{
 		SecureCookies: tlsEnabled || envEnabled(os.Getenv("APP_COOKIE_SECURE")),
+		Version:       version,
 	})
 	if err != nil {
 		log.Fatal(err)

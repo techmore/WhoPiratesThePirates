@@ -147,6 +147,9 @@
       font-size:13px;
     }
     .panel-head { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+    .panel-head-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .release-label { font-size:12px; letter-spacing:.08em; text-transform:uppercase; }
+    .release-chip { border-color:rgba(176,125,42,.55) !important; color:var(--olive-100) !important; }
     .section-eyebrow { text-transform:uppercase; letter-spacing:.18em; font-size:11px; }
     .brand-title {
       margin:2px 0 8px;
@@ -329,6 +332,7 @@
     <div class="brand-title">Who Pirates the Pirates?</div>
     <div class="toolbar">
       {{range .Chips}}<span class="chip">{{.}}</span>{{end}}
+      <span class="chip release-chip" title="Running application release">Release {{version}}</span>
     </div>
   </div>
   <a class="muted" href="{{.ActionHref}}">{{.ActionLabel}}</a>
@@ -346,7 +350,10 @@
     <h1 class="section-title">{{.Title}}</h1>
     <div class="muted">{{.Subtitle}}</div>
   </div>
-  {{if .ActionHref}}<div><a href="{{.ActionHref}}">{{.ActionLabel}}</a></div>{{end}}
+  <div class="panel-head-actions">
+    <span class="muted release-label">Release {{version}}</span>
+    {{if .ActionHref}}<a href="{{.ActionHref}}">{{.ActionLabel}}</a>{{end}}
+  </div>
 </div>
 {{end}}
 

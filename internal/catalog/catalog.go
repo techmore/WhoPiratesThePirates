@@ -2,7 +2,9 @@ package catalog
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -60,6 +62,54 @@ func Open(path string) (*Catalog, error) {
 		return nil, err
 	}
 	return &Catalog{db: db}, nil
+}
+
+// Validate checks that path is an intact, non-empty catalog that exposes the
+// tables required by the read-only query layer. It never modifies the source
+// database.
+func Validate(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", path)
+	}
+
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		return err
+	}
+
+	var integrity string
+	if err := db.QueryRow(`pragma integrity_check`).Scan(&integrity); err != nil {
+		return err
+	}
+	if integrity != "ok" {
+		return fmt.Errorf("sqlite integrity check returned %q", integrity)
+	}
+	for _, table := range []string{"torrents", "files", "categories", "yts_movies", "yts_torrent_data"} {
+		var name string
+		err := db.QueryRow(`select name from sqlite_master where type = 'table' and name = ?`, table).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("required table %q is missing", table)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	var torrents int64
+	if err := db.QueryRow(`select count(*) from torrents`).Scan(&torrents); err != nil {
+		return err
+	}
+	if torrents == 0 {
+		return errors.New("catalog contains no torrents")
+	}
+	return nil
 }
 
 func (c *Catalog) Close() error { return c.db.Close() }

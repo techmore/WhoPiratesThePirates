@@ -47,6 +47,7 @@ The app-owned state database currently uses:
 
 - `settings`
 - `admin_audit`
+- `catalog_sources`
 
 The `settings` table also persists `admin_session_epoch`, which is used to revoke admin cookies server-side on logout.
 
@@ -68,6 +69,8 @@ Implemented app-owned tables now also include:
 - catalog routes must keep working even if app state is empty.
 - settings changes must never write into the catalog DB.
 - any future ingest pipeline must write only to app-owned schema or to a separate validated staging database.
+- recovery catalog switching validates a local SQLite backup before atomically replacing
+  the in-memory read-only catalog handle.
 
 ## Backend Shape
 
@@ -99,6 +102,8 @@ Current admin routes also provide:
 1. Live status and DB health via `/api/admin/status`.
 2. Paged audit, import-run, and import-source inspection.
 3. Authorized manifest preview and record flows with checksum validation.
+4. Recovery catalog source management, customer-facing magnet links, and live
+   validated catalog loading from a local path.
 
 The live status payload also includes:
 
@@ -109,11 +114,10 @@ The live status payload also includes:
 
 Phase 2 expands the system without changing the trust boundary:
 
-1. Add migrations for app-owned tables.
-2. Add authorized import adapters for datasets the operator controls or is allowed to ingest.
-3. Add optional validation and checksum/manifest support.
-4. Add derived indexes or FTS if search performance requires it.
-5. Package the binary for macOS and Linux with native service definitions:
+1. Add authorized import adapters for datasets the operator controls or is allowed to ingest.
+2. Add optional validation and checksum/manifest support.
+3. Add derived indexes or FTS if search performance requires it.
+4. Package the binary for macOS and Linux with native service definitions:
 
 - macOS `launchd` for a lightweight native service
 - Apple `container machine` plus Orchard for an isolated Mac deployment

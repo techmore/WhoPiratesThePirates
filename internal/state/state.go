@@ -62,6 +62,23 @@ type ImportReference struct {
 	CreatedAt int64  `json:"createdAt"`
 }
 
+// CatalogSource is an operator-managed recovery entry. Magnet is the
+// customer-facing reference; CatalogPath is an optional local file that an
+// administrator can validate and load into the running browser.
+type CatalogSource struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Magnet      string `json:"magnet,omitempty"`
+	CatalogPath string `json:"catalogPath,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   int64  `json:"createdAt"`
+}
+
+type ActiveCatalog struct {
+	Name string
+	Path string
+}
+
 type AdminSettings struct {
 	TorEnabled        bool   `json:"torEnabled"`
 	TorMode           string `json:"torMode"`
@@ -100,6 +117,7 @@ func ensureSchema(db *sql.DB) error {
 		`create table if not exists import_runs (id integer primary key autoincrement, source_id integer not null, status text not null, started_at integer not null, finished_at integer not null default 0, message text not null default '', checksum text not null default '', approved_ref text not null default '', foreign key(source_id) references import_sources(id))`,
 		`create table if not exists import_manifests (id integer primary key autoincrement, name text not null, approved_by text not null, base_dir text not null, checksum text not null, preview_checksum text not null, total_bytes integer not null, created_at integer not null)`,
 		`create table if not exists import_references (id integer primary key autoincrement, kind text not null, reference text not null, info_hash text not null default '', name text not null default '', trackers text not null default '', created_at integer not null)`,
+		`create table if not exists catalog_sources (id integer primary key autoincrement, name text not null, magnet text not null default '', catalog_path text not null default '', enabled integer not null default 1, created_at integer not null)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -449,6 +467,144 @@ func (s *Store) ImportReferences(limit int) ([]ImportReference, error) {
 
 func (s *Store) DeleteImportReference(id int64) error {
 	_, err := s.db.Exec(`delete from import_references where id = ?`, id)
+	return err
+}
+
+func (s *Store) CatalogSources() ([]CatalogSource, error) {
+	return s.CatalogSourcesOffset(1000, 0)
+}
+
+func (s *Store) CatalogSourcesOffset(limit, offset int) ([]CatalogSource, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.Query(`select id, name, magnet, catalog_path, enabled, created_at from catalog_sources order by id desc limit ? offset ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]CatalogSource, 0, limit)
+	for rows.Next() {
+		var item CatalogSource
+		var enabled int
+		if err := rows.Scan(&item.ID, &item.Name, &item.Magnet, &item.CatalogPath, &enabled, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.Enabled = enabled != 0
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) EnabledCatalogSources() ([]CatalogSource, error) {
+	rows, err := s.db.Query(`select id, name, magnet, catalog_path, enabled, created_at from catalog_sources where enabled = 1 and magnet <> '' order by id desc`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]CatalogSource, 0)
+	for rows.Next() {
+		var item CatalogSource
+		var enabled int
+		if err := rows.Scan(&item.ID, &item.Name, &item.Magnet, &item.CatalogPath, &enabled, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.Enabled = enabled != 0
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) CatalogSource(id int64) (CatalogSource, error) {
+	var item CatalogSource
+	var enabled int
+	err := s.db.QueryRow(`select id, name, magnet, catalog_path, enabled, created_at from catalog_sources where id = ?`, id).Scan(&item.ID, &item.Name, &item.Magnet, &item.CatalogPath, &enabled, &item.CreatedAt)
+	if err != nil {
+		return CatalogSource{}, err
+	}
+	item.Enabled = enabled != 0
+	return item, nil
+}
+
+func (s *Store) CatalogSourceTotals() (int64, error) {
+	var count int64
+	err := s.db.QueryRow(`select count(*) from catalog_sources`).Scan(&count)
+	return count, err
+}
+
+func (s *Store) CreateCatalogSource(name, magnet, catalogPath string, enabled bool) error {
+	_, err := s.db.Exec(
+		`insert into catalog_sources(name, magnet, catalog_path, enabled, created_at) values(?, ?, ?, ?, ?)`,
+		name, magnet, catalogPath, boolToInt(enabled), time.Now().Unix(),
+	)
+	return err
+}
+
+func (s *Store) UpdateCatalogSource(id int64, name, magnet, catalogPath string) error {
+	_, err := s.db.Exec(
+		`update catalog_sources set name = ?, magnet = ?, catalog_path = ? where id = ?`,
+		name, magnet, catalogPath, id,
+	)
+	return err
+}
+
+func (s *Store) SetCatalogSourceEnabled(id int64, enabled bool) error {
+	_, err := s.db.Exec(`update catalog_sources set enabled = ? where id = ?`, boolToInt(enabled), id)
+	return err
+}
+
+func (s *Store) DeleteCatalogSource(id int64) error {
+	_, err := s.db.Exec(`delete from catalog_sources where id = ?`, id)
+	return err
+}
+
+func (s *Store) ActiveCatalog() (ActiveCatalog, error) {
+	active := ActiveCatalog{}
+	rows, err := s.db.Query(`select key, value from settings where key in ('active_catalog_name', 'active_catalog_path')`)
+	if err != nil {
+		return active, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return active, err
+		}
+		switch key {
+		case "active_catalog_name":
+			active.Name = value
+		case "active_catalog_path":
+			active.Path = value
+		}
+	}
+	return active, rows.Err()
+}
+
+func (s *Store) SetActiveCatalog(name, path string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range map[string]string{
+		"active_catalog_name": name,
+		"active_catalog_path": path,
+	} {
+		if _, err := tx.Exec(`insert into settings(key, value) values(?, ?) on conflict(key) do update set value=excluded.value`, key, value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ClearActiveCatalog() error {
+	_, err := s.db.Exec(`delete from settings where key in ('active_catalog_name', 'active_catalog_path')`)
 	return err
 }
 
