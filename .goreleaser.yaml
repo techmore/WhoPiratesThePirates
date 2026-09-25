@@ -1,0 +1,49 @@
+version: 2
+
+project_name: whop2p
+
+builds:
+  - id: whop2p
+    main: ./cmd/server
+    binary: whop2p
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: binaries
+    ids:
+      - whop2p
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - name: whop2p
+    directory: Formula
+    homepage: https://github.com/techmore/WhoPiratesThePirates
+    description: Private, read-only torrent metadata catalog browser
+    repository:
+      owner: techmore
+      name: homebrew-tap
+      branch: main
+      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
+    install: |
+      bin.install "whop2p"
+      bin.install_symlink "whop2p" => "who-pirates-the-pirates"
+    test: |
+      system "#{bin}/whop2p", "--version"
+    caveats: |
+      Configure APP_DB_PATH, APP_STATE_PATH, and ADMIN_PASSWORD before starting the service.

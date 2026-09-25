@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -15,7 +16,14 @@ import (
 	"who-pirates-the-pirates/internal/app"
 )
 
+var version = "dev"
+
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println(version)
+		return
+	}
+
 	dbPath := os.Getenv("APP_DB_PATH")
 	if dbPath == "" {
 		dbPath = "tpb.sqlite"

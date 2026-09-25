@@ -1,6 +1,7 @@
 .DS_Store
 internal/.DS_Store
 bin/
+dist/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
