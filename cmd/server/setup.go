@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -80,6 +81,120 @@ func runSetup() error {
 		fmt.Println("next: set ADMIN_PASSWORD, then run: brew services start whop2p")
 	} else {
 		fmt.Println("next: set ADMIN_PASSWORD, then run: whop2p")
+	}
+	return nil
+}
+
+func runLoadCatalog(source string) error {
+	if err := validateCatalog(source); err != nil {
+		return fmt.Errorf("catalog validation failed: %w", err)
+	}
+	home, err := defaultConfigHome()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
+	}
+	sourceAbs, err := filepath.Abs(source)
+	if err != nil {
+		return err
+	}
+	destination := filepath.Join(home, "catalog.sqlite")
+	destinationAbs, err := filepath.Abs(destination)
+	if err != nil {
+		return err
+	}
+	if sourceAbs == destinationAbs {
+		return fmt.Errorf("source and destination are the same file: %s", destination)
+	}
+
+	if _, err := os.Stat(destination); err == nil {
+		backup := fmt.Sprintf("catalog.sqlite.backup-%s", time.Now().UTC().Format("20060102T150405Z"))
+		if err := os.Rename(destination, filepath.Join(home, backup)); err != nil {
+			return fmt.Errorf("back up existing catalog: %w", err)
+		}
+		fmt.Printf("backed up existing catalog to %s\n", filepath.Join(home, backup))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	temporary, err := os.CreateTemp(home, ".catalog-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	input, err := os.Open(sourceAbs)
+	if err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := io.Copy(temporary, input); err != nil {
+		_ = input.Close()
+		_ = temporary.Close()
+		return err
+	}
+	if err := input.Close(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, destination); err != nil {
+		return err
+	}
+	fmt.Printf("installed catalog %s\n", destination)
+	fmt.Println("restart the service to read the new catalog")
+	return nil
+}
+
+func validateCatalog(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", path)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	var integrity string
+	if err := db.QueryRow(`pragma integrity_check`).Scan(&integrity); err != nil {
+		return err
+	}
+	if integrity != "ok" {
+		return fmt.Errorf("sqlite integrity check returned %q", integrity)
+	}
+	for _, table := range []string{"torrents", "files", "categories"} {
+		var name string
+		err := db.QueryRow(`select name from sqlite_master where type = 'table' and name = ?`, table).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("required table %q is missing", table)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	var torrents int64
+	if err := db.QueryRow(`select count(*) from torrents`).Scan(&torrents); err != nil {
+		return err
+	}
+	if torrents == 0 {
+		return fmt.Errorf("catalog contains no torrents")
 	}
 	return nil
 }

@@ -37,7 +37,17 @@ whop2p --version
 
 `setup` creates a private `~/.config/whop2p` directory with an empty catalog,
 app state, and a mode-0600 `service.env`. It does not overwrite an existing
-catalog. On macOS, the release formula can then be started with:
+catalog. Load an authorized SQLite backup with:
+
+```sh
+whop2p load-catalog /path/to/catalog.sqlite
+```
+
+The loader runs SQLite integrity checks, verifies the required catalog tables,
+backs up the current catalog, and installs the replacement atomically. Restart
+the service afterward.
+
+On macOS, the release formula can then be started with:
 
 ```sh
 brew services start whop2p

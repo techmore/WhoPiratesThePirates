@@ -67,14 +67,17 @@ After installation, initialize the local configuration and start the service:
 
 ```sh
 whop2p setup
+whop2p load-catalog /path/to/validated-catalog.sqlite
 brew services start whop2p
 whop2p open
 ```
 
 `whop2p setup` creates a private configuration directory, an empty catalog, app
 state, and a mode-0600 service environment file. It never overwrites an
-existing catalog. Set `ADMIN_PASSWORD` in the generated `service.env` before
-using the admin surface.
+existing catalog. `whop2p load-catalog` validates SQLite integrity and the
+required catalog tables, backs up the current catalog, then atomically installs
+the new one. Set `ADMIN_PASSWORD` in the generated `service.env` before using
+the admin surface.
 
 In every deployment, keep the catalog database read-only and keep app state in a
 separate writable database. The default bind address is loopback; use a private

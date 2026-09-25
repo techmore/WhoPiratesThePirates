@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,6 +72,42 @@ func TestRunSetupCreatesLocalConfiguration(t *testing.T) {
 	}
 	if string(contents) != "operator-owned" {
 		t.Fatalf("setup overwrote an existing catalog: %q", contents)
+	}
+}
+
+func TestRunLoadCatalogValidatesAndInstallsBackup(t *testing.T) {
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "source.sqlite")
+	if err := createEmptyCatalog(source); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into torrents(id, category, status, name, numFiles, size, seeders, leechers, username, added, description, infoHash) values (1, 0, 'seeded', 'Ubuntu', 0, 1, 1, 0, 'tester', 1, 'fixture', '0123456789abcdef0123456789abcdef01234567')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	t.Setenv("WHOP2P_HOME", home)
+	if err := runLoadCatalog(source); err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(home, "catalog.sqlite")
+	if _, err := os.Stat(installed); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := filepath.Join(sourceDir, "invalid.sqlite")
+	if err := os.WriteFile(invalid, []byte("not sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runLoadCatalog(invalid); err == nil {
+		t.Fatal("expected invalid catalog to be rejected")
 	}
 }
 

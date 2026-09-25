@@ -34,6 +34,17 @@ func main() {
 				log.Fatal(err)
 			}
 			return
+		case "load-catalog":
+			if len(os.Args) != 3 {
+				log.Fatal("usage: whop2p load-catalog <catalog.sqlite>")
+			}
+			if err := runLoadCatalog(os.Args[2]); err != nil {
+				log.Fatal(err)
+			}
+			return
+		case "help", "--help", "-h":
+			printUsage()
+			return
 		}
 	}
 	if err := loadServiceEnv(); err != nil {
@@ -117,6 +128,15 @@ func main() {
 			log.Printf("database close: %v", err)
 		}
 	}
+}
+
+func printUsage() {
+	fmt.Println(`Usage:
+  whop2p                 start the catalog server
+  whop2p setup           create local configuration and an empty catalog
+  whop2p load-catalog FILE install a validated catalog backup
+  whop2p open            open the running catalog in a browser
+  whop2p --version       print the build version`)
 }
 
 func isLoopbackAddress(value string) bool {
