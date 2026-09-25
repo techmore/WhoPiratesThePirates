@@ -7,6 +7,7 @@
     <input id="admin-password" name="password" type="password" placeholder="Admin password" autocomplete="current-password" class="field" required autofocus>
     <button type="submit" class="button-primary">Login</button>
     <div class="muted note">Session access is scoped to this device and stored as a signed cookie.</div>
+    <div class="muted note">If login reports that the admin password is not configured, set <code>ADMIN_PASSWORD</code> in the service environment and restart whop2p.</div>
   </form>
 </div>
 {{end}}

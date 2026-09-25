@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -33,6 +34,7 @@ type App struct {
 	catalogName     string
 	catalogRevision uint64
 	version         string
+	recoveryDir     string
 	state           *state.Store
 	adminPass       string
 	secret          []byte
@@ -43,6 +45,8 @@ type App struct {
 }
 
 const maxRequestBodyBytes int64 = 1 << 20
+const maxCatalogUploadBytes int64 = 4 << 30
+const maxCatalogUploadMemoryBytes = 32 << 20
 
 const (
 	maxLoginFailures       = 5
@@ -138,6 +142,7 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 		catalogName:     selectedName,
 		catalogRevision: 1,
 		version:         releaseVersion,
+		recoveryDir:     filepath.Join(filepath.Dir(statePath), "recovery-catalogs"),
 		state:           st,
 		adminPass:       os.Getenv("ADMIN_PASSWORD"),
 		secret:          secret,
@@ -213,12 +218,19 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("/api/admin/import-references", a.requireAdmin(a.handleAdminImportReferences))
 	mux.HandleFunc("/api/admin/import-references/list", a.requireAdmin(a.handleAdminImportReferencesList))
 	mux.HandleFunc("/api/admin/catalog-sources", a.requireAdmin(a.handleAdminCatalogSources))
+	mux.HandleFunc("/api/admin/catalog-sources/upload", a.requireAdmin(a.handleAdminCatalogSourceUpload))
 	mux.HandleFunc("/api/admin/catalog-sources/update", a.requireAdmin(a.handleAdminUpdateCatalogSource))
 	mux.HandleFunc("/api/admin/catalog-sources/toggle", a.requireAdmin(a.handleAdminToggleCatalogSource))
 	mux.HandleFunc("/api/admin/catalog-sources/delete", a.requireAdmin(a.handleAdminDeleteCatalogSource))
 	mux.HandleFunc("/api/admin/catalog-sources/load", a.requireAdmin(a.handleAdminLoadCatalogSource))
 	mux.HandleFunc("/api/admin/tor", a.requireAdmin(a.handleAdminTorUpdate))
-	return securityHeaders(http.MaxBytesHandler(mux, maxRequestBodyBytes))
+	return securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := maxRequestBodyBytes
+		if r.URL.Path == "/api/admin/catalog-sources/upload" {
+			limit = maxCatalogUploadBytes
+		}
+		http.MaxBytesHandler(mux, limit).ServeHTTP(w, r)
+	}))
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -1297,6 +1309,137 @@ func (a *App) handleAdminCatalogSources(w http.ResponseWriter, r *http.Request) 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (a *App) handleAdminCatalogSourceUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(maxCatalogUploadMemoryBytes); err != nil {
+		_ = a.state.Audit("catalog_source_upload_rejected", err.Error())
+		http.Error(w, "invalid upload form", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	magnet := strings.TrimSpace(r.FormValue("magnet"))
+	if name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	parsed, err := importer.ParseExternalReference(magnet)
+	if err != nil || parsed.Kind != "magnet" {
+		http.Error(w, "a valid magnet link is required for an uploaded recovery catalog", http.StatusBadRequest)
+		return
+	}
+	file, header, err := r.FormFile("catalog_file")
+	if err != nil {
+		http.Error(w, "catalog SQLite file is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	if header.Size <= 0 {
+		http.Error(w, "catalog SQLite file is empty", http.StatusBadRequest)
+		return
+	}
+	if header.Size > maxCatalogUploadBytes {
+		http.Error(w, "catalog SQLite file is too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	catalogPath, err := a.saveUploadedCatalog(file, name)
+	if err != nil {
+		_ = a.state.Audit("catalog_source_upload_rejected", fmt.Sprintf("name=%s error=%v", name, err))
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	enabled := r.FormValue("enabled") != ""
+	if err := a.state.CreateCatalogSource(name, parsed.Reference, catalogPath, enabled); err != nil {
+		_ = os.Remove(catalogPath)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = a.state.Audit("catalog_source_upload", fmt.Sprintf("name=%s path=%s", name, catalogPath))
+	if r.FormValue("load_now") != "" {
+		if err := a.replaceCatalog(catalogPath, name); err != nil {
+			_ = a.state.Audit("catalog_load_rejected", fmt.Sprintf("name=%s path=%s error=%v", name, catalogPath, err))
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = a.state.Audit("catalog_source_loaded_on_upload", fmt.Sprintf("name=%s path=%s", name, catalogPath))
+	}
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+}
+
+func (a *App) saveUploadedCatalog(file io.Reader, name string) (string, error) {
+	if err := os.MkdirAll(a.recoveryDir, 0o700); err != nil {
+		return "", fmt.Errorf("create recovery catalog directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(a.recoveryDir, ".catalog-upload-*.sqlite")
+	if err != nil {
+		return "", fmt.Errorf("create temporary catalog: %w", err)
+	}
+	temporaryName := temporary.Name()
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = os.Remove(temporaryName)
+		}
+	}()
+	written, err := io.Copy(temporary, io.LimitReader(file, maxCatalogUploadBytes+1))
+	if err != nil {
+		_ = temporary.Close()
+		return "", fmt.Errorf("save catalog upload: %w", err)
+	}
+	if written > maxCatalogUploadBytes {
+		_ = temporary.Close()
+		return "", fmt.Errorf("catalog SQLite file is too large")
+	}
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return "", fmt.Errorf("secure catalog upload: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return "", fmt.Errorf("sync catalog upload: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return "", fmt.Errorf("close catalog upload: %w", err)
+	}
+	if err := catalog.Validate(temporaryName); err != nil {
+		return "", fmt.Errorf("catalog validation failed: %w", err)
+	}
+	finalPath := filepath.Join(a.recoveryDir, fmt.Sprintf("%s-%d.sqlite", recoveryCatalogSlug(name), time.Now().UnixNano()))
+	if err := os.Rename(temporaryName, finalPath); err != nil {
+		return "", fmt.Errorf("install catalog upload: %w", err)
+	}
+	removeTemporary = false
+	return finalPath, nil
+}
+
+func recoveryCatalogSlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	dashed := false
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			builder.WriteRune(char)
+			dashed = false
+			continue
+		}
+		if builder.Len() > 0 && !dashed {
+			builder.WriteByte('-')
+			dashed = true
+		}
+	}
+	slug := strings.Trim(builder.String(), "-")
+	if slug == "" {
+		slug = "catalog"
+	}
+	if len(slug) > 80 {
+		slug = strings.TrimRight(slug[:80], "-")
+	}
+	return slug
 }
 
 func (a *App) handleAdminUpdateCatalogSource(w http.ResponseWriter, r *http.Request) {

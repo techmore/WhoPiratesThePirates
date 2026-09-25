@@ -46,7 +46,33 @@
     </div>
     <div class="card" id="catalog-source-admin">
       {{template "sectiontitle" "Catalog Recovery Sources"}}
-      <p class="muted">Publish approved magnet links for customers and optionally associate each link with a local SQLite backup. Loading validates the database, swaps the running read-only catalog, and leaves the source file untouched.</p>
+      <p class="muted">Upload an authorized SQLite backup, attach the customer download magnet, and optionally load the validated database immediately. The app stores the backup read-only; an approved torrent client must seed the matching magnet.</p>
+      <div class="card" style="margin-top:14px;padding:16px;background:var(--surface-strong);">
+        <div class="panel-head" style="margin-bottom:10px;">
+          <div>
+            <div class="muted section-eyebrow">Upload and publish</div>
+            <h3 class="section-title section-title-small" style="margin:0;">Add a recovery database file</h3>
+          </div>
+        </div>
+        <form method="post" action="/api/admin/catalog-sources/upload" enctype="multipart/form-data" class="form-section">
+          <div class="form-grid">
+            <div>
+              <label for="catalog-upload-name">Display name</label>
+              <input id="catalog-upload-name" name="name" required placeholder="Primary recovery catalog">
+            </div>
+            <div>
+              <label for="catalog-upload-magnet">Customer magnet link</label>
+              <input id="catalog-upload-magnet" name="magnet" required placeholder="magnet:?xt=urn:btih:...">
+            </div>
+          </div>
+          <label for="catalog-upload-file">SQLite catalog backup</label>
+          <input id="catalog-upload-file" name="catalog_file" type="file" accept=".sqlite,.db,application/x-sqlite3" required>
+          <label class="check-label"><input type="checkbox" name="enabled" checked> Show magnet in the customer recovery dropdown</label>
+          <label class="check-label"><input type="checkbox" name="load_now" checked> Validate and load this database immediately</label>
+          <button type="submit">Upload and Publish Recovery Catalog</button>
+        </form>
+      </div>
+      <div class="muted" style="margin-top:18px;">Already have the database on this machine? Register its path below instead of uploading a second copy.</div>
       <form method="post" action="/api/admin/catalog-sources" class="form-section">
         <div class="form-grid">
           <div>
@@ -62,7 +88,7 @@
         <input name="catalog_path" placeholder="/path/to/recovered/catalog.sqlite">
         <label class="check-label"><input type="checkbox" name="enabled" checked> Show magnet in the customer recovery dropdown</label>
         <label class="check-label"><input type="checkbox" name="load_now" checked> Validate and load immediately when a local database path is provided</label>
-        <button type="submit">Add Recovery Source</button>
+        <button type="submit">Register Recovery Source</button>
       </form>
       <form id="catalog-load-form" method="post" action="/api/admin/catalog-sources/load" class="form-section" style="margin-top:18px;border-top:1px solid var(--line-soft);padding-top:18px;">
         <div class="form-grid">

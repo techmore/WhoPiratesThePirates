@@ -162,10 +162,11 @@ only to `app_state.sqlite`.
 ### Recovery catalog links
 
 Admins can open **Catalog Recovery Sources** under `/admin` to save an
-approved magnet link and, when the backup has been recovered locally, its
-SQLite path. Enabled magnets appear in the **Authorized catalog backups**
-dropdown on the browse page so customers can copy or open the link in an
-approved recovery client.
+approved magnet link and upload an authorized SQLite backup. The upload form
+validates the database, stores a private copy under the app state directory,
+registers the magnet, and can load that copy immediately. Enabled magnets
+appear in the **Authorized catalog backups** dropdown on the browse page so
+customers can copy or open the link in an approved recovery client.
 
 The server does not fetch magnet content or invoke a torrent client. After an
 authorized client has produced a local SQLite backup, an admin can select its
@@ -175,7 +176,8 @@ the checked **Validate and load immediately** option performs that validation
 and live load automatically. The running search UI detects the catalog change,
 refreshes its counts/categories/results, and remembers the selection across
 service restarts while the recovered file remains valid; the source database
-is never modified.
+is never modified. Uploading the database does not create or seed the matching
+torrent; an approved torrent client must already seed the magnet customers use.
 
 ## Environment
 
@@ -231,6 +233,7 @@ The admin panel is protected by a signed, server-revocable session cookie.
 - `/api/admin/import-references` — record authorized magnet or `.torrent` metadata
 - `/api/admin/import-references/list` — list recorded metadata references
 - `/api/admin/catalog-sources` — manage recovery catalog labels, magnets, and local paths
+- `/api/admin/catalog-sources/upload` — upload, validate, register, and optionally load a SQLite recovery catalog
 - `/api/admin/catalog-sources/load` — validate and live-load a local catalog backup
 
 ### External reference import

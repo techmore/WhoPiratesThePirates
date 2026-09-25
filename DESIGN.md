@@ -102,8 +102,8 @@ Current admin routes also provide:
 1. Live status and DB health via `/api/admin/status`.
 2. Paged audit, import-run, and import-source inspection.
 3. Authorized manifest preview and record flows with checksum validation.
-4. Recovery catalog source management, customer-facing magnet links, and live
-   validated catalog loading from a local path.
+4. Recovery catalog source management, customer-facing magnet links, validated
+   local catalog upload, and live catalog loading.
 
 The live status payload also includes:
 

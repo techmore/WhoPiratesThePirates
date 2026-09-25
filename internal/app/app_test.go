@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
@@ -8,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1695,7 +1697,7 @@ func TestReleaseVersionIsDisplayedAndReported(t *testing.T) {
 	if pageRec.Code != http.StatusOK {
 		t.Fatalf("unexpected page status: %d body=%s", pageRec.Code, pageRec.Body.String())
 	}
-	if !strings.Contains(pageRec.Body.String(), "Release v9.9.9-test") {
+	if !strings.Contains(pageRec.Body.String(), "Version</span><strong>v9.9.9-test") {
 		t.Fatalf("expected release version in UI header, body=%s", pageRec.Body.String())
 	}
 
@@ -2474,6 +2476,96 @@ func TestAdminCatalogSourceCreateLoadsLocalCatalogAndPublishesRevision(t *testin
 	}
 	if statusPayload.Name != "Recovered on create" || statusPayload.Revision < 2 {
 		t.Fatalf("unexpected catalog status payload: %#v", statusPayload)
+	}
+}
+
+func TestAdminCatalogSourceUploadValidatesRegistersAndLoads(t *testing.T) {
+	a, _, statePath := newTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	sourcePath := filepath.Join(t.TempDir(), "uploaded-source.sqlite")
+	seedCatalog(t, sourcePath)
+	db, err := sql.Open("sqlite", sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("update torrents set name = 'Uploaded Recovery Catalog'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range map[string]string{
+		"name":     "Uploaded recovery",
+		"magnet":   "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+		"enabled":  "1",
+		"load_now": "1",
+	} {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	part, err := writer.CreateFormFile("catalog_file", "recovered.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(contents); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/catalog-sources/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("unexpected upload status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	sources, err := a.state.CatalogSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].Name != "Uploaded recovery" || sources[0].Magnet == "" {
+		t.Fatalf("unexpected uploaded source: %#v", sources)
+	}
+	if sources[0].CatalogPath == "" || filepath.Dir(sources[0].CatalogPath) != filepath.Join(filepath.Dir(statePath), "recovery-catalogs") {
+		t.Fatalf("expected uploaded catalog under recovery directory, got %#v", sources[0])
+	}
+	if _, err := os.Stat(sources[0].CatalogPath); err != nil {
+		t.Fatalf("uploaded catalog was not installed: %v", err)
+	}
+
+	searchReq := httptest.NewRequest(http.MethodGet, "/api/search?q=Uploaded+Recovery", nil)
+	searchRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(searchRec, searchReq)
+	if searchRec.Code != http.StatusOK {
+		t.Fatalf("unexpected search status: %d body=%s", searchRec.Code, searchRec.Body.String())
+	}
+	var searchPayload struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(searchRec.Body.Bytes(), &searchPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(searchPayload.Items) != 1 || searchPayload.Items[0].Name != "Uploaded Recovery Catalog" {
+		t.Fatalf("expected uploaded catalog to be active, got %#v", searchPayload)
 	}
 }
 
