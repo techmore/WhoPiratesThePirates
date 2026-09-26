@@ -23,8 +23,9 @@ sudo deploy/ubuntu/install.sh ./bin/who-pirates-the-pirates /path/to/catalog.sql
 The installer creates an unprivileged service account, installs the unit, creates
 an environment file if one does not already exist, and enables the service.
 
-Edit `/etc/who-pirates-the-pirates.env` and set `ADMIN_PASSWORD` and
-`ADMIN_SESSION_SECRET` before using the admin surface:
+Edit `/etc/who-pirates-the-pirates.env` and set `ADMIN_SESSION_SECRET`. Set
+`ADMIN_PASSWORD` when the service is exposed beyond its private machine;
+leaving it empty enables password-free local mode:
 
 ```sh
 sudo chmod 600 /etc/who-pirates-the-pirates.env

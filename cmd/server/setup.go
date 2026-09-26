@@ -69,7 +69,7 @@ func runSetup() error {
 		if err := os.WriteFile(envPath, []byte(contents), 0o600); err != nil {
 			return err
 		}
-		fmt.Printf("created %s; set ADMIN_PASSWORD before using the admin surface\n", envPath)
+		fmt.Printf("created %s; ADMIN_PASSWORD is optional for local loopback/container mode\n", envPath)
 	} else if err != nil {
 		return err
 	} else {
@@ -78,9 +78,9 @@ func runSetup() error {
 
 	fmt.Println("setup complete")
 	if runtime.GOOS == "darwin" {
-		fmt.Println("next: set ADMIN_PASSWORD, then run: brew services start whop2p")
+		fmt.Println("next: optionally set ADMIN_PASSWORD, then run: brew services start whop2p")
 	} else {
-		fmt.Println("next: set ADMIN_PASSWORD, then run: whop2p")
+		fmt.Println("next: optionally set ADMIN_PASSWORD, then run: whop2p")
 	}
 	return nil
 }

@@ -48,7 +48,7 @@ ADMIN_SESSION_SECRET=$session_secret
 EOF
   chmod 0600 "$env_file"
   chown root:root "$env_file"
-  echo "created $env_file; set ADMIN_PASSWORD before using the admin surface"
+  echo "created $env_file; ADMIN_PASSWORD is optional for local mode"
 fi
 
 install -m 0644 "$(dirname "$0")/who-pirates-the-pirates.service" "$unit"
@@ -58,4 +58,4 @@ systemctl restart who-pirates-the-pirates.service
 systemctl --no-pager --full status who-pirates-the-pirates.service || true
 
 echo
-echo "Next: edit $env_file, set ADMIN_PASSWORD, and restart the service."
+echo "Next: edit $env_file if password protection is needed, and restart the service."

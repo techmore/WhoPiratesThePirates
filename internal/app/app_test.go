@@ -256,6 +256,29 @@ func TestAdminLoginAndLogoutFlow(t *testing.T) {
 	}
 }
 
+func TestAdminAccessIsAvailableWithoutPasswordForLocalMode(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+	a.adminPass = ""
+
+	pageReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	pageRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(pageRec, pageReq)
+	if pageRec.Code != http.StatusOK {
+		t.Fatalf("expected password-free admin page, got %d body=%s", pageRec.Code, pageRec.Body.String())
+	}
+	if !strings.Contains(pageRec.Body.String(), "Upload and Publish Recovery Catalog") {
+		t.Fatalf("expected upload control in password-free admin page, body=%s", pageRec.Body.String())
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	statusRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("expected password-free admin status, got %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+}
+
 func TestAdminTorUpdatePreservesSessionEpoch(t *testing.T) {
 	a, _ := newAdminTestApp(t, testAdminPassword)
 	defer a.Close()
@@ -595,7 +618,7 @@ func TestAdminLoginRejectsBadRequests(t *testing.T) {
 
 }
 
-func TestAdminLoginFailsWithoutConfiguredPassword(t *testing.T) {
+func TestAdminLoginRedirectsWithoutConfiguredPassword(t *testing.T) {
 	a, _ := newAdminTestApp(t, "")
 	defer a.Close()
 
@@ -606,7 +629,7 @@ func TestAdminLoginFailsWithoutConfiguredPassword(t *testing.T) {
 
 	a.Router().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin" {
 		t.Fatalf("unexpected code: %d body=%s", rec.Code, rec.Body.String())
 	}
 }

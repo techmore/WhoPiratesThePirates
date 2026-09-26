@@ -35,7 +35,7 @@ if [[ ! -f "$service_env" ]]; then
     printf 'ADMIN_SESSION_SECRET=%s\n' "$session_secret"
   } >"$service_env"
   chmod 0600 "$service_env"
-  echo "created $service_env; set ADMIN_PASSWORD before using the admin surface"
+  echo "created $service_env; ADMIN_PASSWORD is optional for local container mode"
 fi
 
 cat >"$run_script" <<EOF
@@ -53,4 +53,4 @@ launchctl bootout "gui/$(id -u)/com.who-pirates-the-pirates" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$plist"
 
 echo "installed com.who-pirates-the-pirates"
-echo "edit $service_env, set ADMIN_PASSWORD, then run: launchctl kickstart -k gui/$(id -u)/com.who-pirates-the-pirates"
+echo "edit $service_env if password protection is needed, then run: launchctl kickstart -k gui/$(id -u)/com.who-pirates-the-pirates"

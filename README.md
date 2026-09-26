@@ -112,14 +112,16 @@ This creates:
 ```
 
 `setup` never overwrites an existing catalog. `service.env` is mode `0600` and
-should be edited before enabling the admin surface:
+can be edited when password protection is needed:
 
 ```sh
 chmod 600 ~/.config/whop2p/service.env
 $EDITOR ~/.config/whop2p/service.env
 ```
 
-Set at least:
+For local loopback or Mac container use, leave `ADMIN_PASSWORD` empty and the
+admin surface is available without a login. Set it for any deployment exposed
+to a network:
 
 ```text
 ADMIN_PASSWORD=use-a-long-random-password
@@ -187,7 +189,7 @@ torrent; an approved torrent client must already seed the magnet customers use.
 | `APP_STATE_PATH` | Writable application state | `app_state.sqlite` |
 | `APP_BIND_ADDR` | Listen address | `127.0.0.1` |
 | `PORT` | Listen port | `8080` |
-| `ADMIN_PASSWORD` | Admin login password | unset |
+| `ADMIN_PASSWORD` | Optional admin login password; unset enables local no-password mode | unset |
 | `ADMIN_SESSION_SECRET` | HMAC session secret | random per process |
 | `APP_TLS_CERT_FILE` | Direct TLS certificate | unset |
 | `APP_TLS_KEY_FILE` | Direct TLS key | unset |
@@ -222,7 +224,10 @@ operator's machine.
 
 ## Admin surface
 
-The admin panel is protected by a signed, server-revocable session cookie.
+When `ADMIN_PASSWORD` is set, the admin panel is protected by a signed,
+server-revocable session cookie. When it is unset, the app uses password-free
+local mode; keep that mode bound to loopback or an equivalent private container
+network.
 
 - `/admin` — admin UI
 - `/api/admin/status` — health, counts, session, and external-client status

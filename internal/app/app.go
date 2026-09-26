@@ -482,8 +482,8 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.adminPass == "" {
-		http.Error(w, "admin password not configured", http.StatusForbidden)
+	if !a.adminPasswordConfigured() {
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -1901,6 +1901,9 @@ func sameOrigin(r *http.Request) bool {
 }
 
 func (a *App) isAdmin(r *http.Request) bool {
+	if !a.adminPasswordConfigured() {
+		return true
+	}
 	c, err := r.Cookie("admin_session")
 	if err != nil || c.Value == "" {
 		return false
@@ -1933,6 +1936,10 @@ func (a *App) isAdmin(r *http.Request) bool {
 	sum := hmac.New(sha256.New, a.secret)
 	sum.Write(payload)
 	return hmac.Equal(mac, sum.Sum(nil))
+}
+
+func (a *App) adminPasswordConfigured() bool {
+	return strings.TrimSpace(a.adminPass) != ""
 }
 
 func clientAddress(r *http.Request) string {

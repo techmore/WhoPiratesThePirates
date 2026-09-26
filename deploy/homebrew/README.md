@@ -36,8 +36,9 @@ brew services start whop2p
 whop2p open
 ```
 
-Set `ADMIN_PASSWORD` in the generated `~/.config/whop2p/service.env` before
-using the admin surface.
+`ADMIN_PASSWORD` is optional for local loopback/container use; set it in the
+generated `~/.config/whop2p/service.env` when the admin surface is exposed to a
+network.
 
 See [`../../docs/RELEASING.md`](../../docs/RELEASING.md) for the full release
 checklist.

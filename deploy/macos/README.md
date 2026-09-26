@@ -33,8 +33,9 @@ The installer creates:
 ~/Library/LaunchAgents/com.who-pirates-the-pirates.plist
 ```
 
-Edit `service.env` and set `ADMIN_PASSWORD`. The file is mode `0600` because it
-contains the admin credential and session secret.
+`ADMIN_PASSWORD` is optional: leave it empty for password-free local container
+mode, or set it when the service is exposed beyond the private machine. The
+file is mode `0600` because it contains the session secret.
 
 The service binds to `127.0.0.1` by default. Use an SSH tunnel, Tailscale, or a
 local TLS reverse proxy for private network access.
