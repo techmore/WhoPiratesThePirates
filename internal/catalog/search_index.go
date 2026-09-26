@@ -35,19 +35,66 @@ func SearchIndexMatches(sourcePath, indexPath string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	indexInfo, err := os.Stat(indexPath)
+	if err != nil || !indexInfo.Mode().IsRegular() {
+		return false, nil
+	}
 	index, err := openReadOnlyDatabase(indexPath, "")
 	if err != nil {
 		return false, nil
 	}
-	defer index.Close()
 
 	var format, indexedPath string
 	var size, modified int64
 	err = index.QueryRow(`select format_version, source_path, source_size, source_modified_ns from search_index_metadata where id = 1`).Scan(&format, &indexedPath, &size, &modified)
-	if err != nil {
+	if err == nil {
+		_ = index.Close()
+		return format == searchIndexFormatVersion && indexedPath == source.path && size == source.size && modified == source.modified, nil
+	}
+
+	var metadataTables int
+	if err := index.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = 'search_index_metadata'`).Scan(&metadataTables); err != nil || metadataTables != 0 {
+		_ = index.Close()
 		return false, nil
 	}
-	return format == searchIndexFormatVersion && indexedPath == source.path && size == source.size && modified == source.modified, nil
+	var searchTables int
+	if err := index.QueryRow(`select count(*) from sqlite_master where type = 'table' and name = 'torrent_search'`).Scan(&searchTables); err != nil || searchTables != 1 {
+		_ = index.Close()
+		return false, nil
+	}
+	var rowID int64
+	if err := index.QueryRow(`select rowid from torrent_search limit 1`).Scan(&rowID); err != nil {
+		_ = index.Close()
+		return false, nil
+	}
+	_ = index.Close()
+
+	// Older releases keyed their durable index by source path. Keep those caches
+	// when they postdate the source file, then stamp them so later checks can
+	// detect in-place catalog replacement without rebuilding a multi-gigabyte
+	// index during startup.
+	if indexInfo.ModTime().UnixNano() < source.modified {
+		return false, nil
+	}
+	adoptLegacySearchIndex(indexPath, source)
+	return true, nil
+}
+
+func adoptLegacySearchIndex(indexPath string, source sourceFingerprint) {
+	index, err := sql.Open("sqlite", sqliteFileURI(indexPath, nil))
+	if err != nil {
+		return
+	}
+	defer index.Close()
+	index.SetMaxOpenConns(1)
+	index.SetMaxIdleConns(1)
+	if err := index.Ping(); err != nil {
+		return
+	}
+	if _, err := index.Exec(`create table if not exists search_index_metadata (id integer primary key check (id = 1), format_version text not null, source_path text not null, source_size integer not null, source_modified_ns integer not null)`); err != nil {
+		return
+	}
+	_, _ = index.Exec(`insert or replace into search_index_metadata (id, format_version, source_path, source_size, source_modified_ns) values (1, ?, ?, ?, ?)`, searchIndexFormatVersion, source.path, source.size, source.modified)
 }
 
 // BuildSearchIndex creates an application-owned FTS5 index for a read-only

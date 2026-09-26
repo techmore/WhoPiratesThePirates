@@ -57,6 +57,8 @@ const maxRequestBodyBytes int64 = 1 << 20
 const maxCatalogUploadBytes int64 = 4 << 30
 const maxCatalogUploadMemoryBytes = 32 << 20
 
+var searchIndexBuildMu sync.Mutex
+
 // parseAdminForm populates r.Form for both encodings a browser can send.
 // Request.ParseForm only understands application/x-www-form-urlencoded, so a
 // fetch call that posts FormData (which is multipart/form-data) would otherwise
@@ -2213,12 +2215,16 @@ func (a *App) ensureSearchIndex(catalogPath string) (string, error) {
 }
 
 func ensureCatalogSearchIndex(directory, catalogPath string) (string, error) {
+	searchIndexBuildMu.Lock()
+	defer searchIndexBuildMu.Unlock()
+
 	indexPath := catalogSearchIndexPath(directory, catalogPath)
 	matches, err := catalog.SearchIndexMatches(catalogPath, indexPath)
 	if err != nil {
 		return "", err
 	}
 	if matches {
+		_ = os.Remove(indexPath + ".building")
 		return indexPath, nil
 	}
 	if err := catalog.BuildSearchIndex(catalogPath, indexPath); err != nil {
