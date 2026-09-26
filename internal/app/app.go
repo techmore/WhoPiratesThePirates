@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,12 +36,16 @@ type App struct {
 	catalogRevision uint64
 	version         string
 	recoveryDir     string
+	downloadDir     string
+	aria2Path       string
 	state           *state.Store
 	adminPass       string
 	secret          []byte
 	secureCookies   bool
 	loginAttempts   map[string]loginAttempt
 	loginMu         sync.Mutex
+	downloadMu      sync.RWMutex
+	downloads       map[int64]downloadStatus
 	embedded        map[string]*template.Template
 }
 
@@ -58,6 +63,21 @@ type loginAttempt struct {
 	failures int
 	resetAt  time.Time
 	lastSeen time.Time
+}
+
+type downloadStatus struct {
+	Status    string `json:"status"`
+	Started   bool   `json:"started"`
+	PID       int    `json:"pid,omitempty"`
+	Directory string `json:"directory,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func configuredDownloadDir(statePath string) string {
+	if value := strings.TrimSpace(os.Getenv("APP_DOWNLOAD_DIR")); value != "" {
+		return value
+	}
+	return filepath.Join(filepath.Dir(statePath), "downloads")
 }
 
 type AdminPageData struct {
@@ -83,8 +103,9 @@ func New(dbPath, statePath string) (*App, error) {
 }
 
 type Options struct {
-	SecureCookies bool
-	Version       string
+	SecureCookies      bool
+	Version            string
+	DownloadClientPath string
 }
 
 func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
@@ -129,6 +150,10 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 	if releaseVersion == "" {
 		releaseVersion = "dev"
 	}
+	aria2Path := strings.TrimSpace(options.DownloadClientPath)
+	if aria2Path == "" {
+		aria2Path = resolveAria2Path()
+	}
 	embedded, err := loadEmbeddedTemplates(releaseVersion)
 	if err != nil {
 		_ = db.Close()
@@ -143,11 +168,14 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 		catalogRevision: 1,
 		version:         releaseVersion,
 		recoveryDir:     filepath.Join(filepath.Dir(statePath), "recovery-catalogs"),
+		downloadDir:     configuredDownloadDir(statePath),
+		aria2Path:       aria2Path,
 		state:           st,
 		adminPass:       os.Getenv("ADMIN_PASSWORD"),
 		secret:          secret,
 		secureCookies:   options.SecureCookies,
 		loginAttempts:   make(map[string]loginAttempt),
+		downloads:       make(map[int64]downloadStatus),
 		embedded:        embedded,
 	}, nil
 }
@@ -614,7 +642,7 @@ func (a *App) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		"catalogRevision":          catalogRevision,
 		"catalogSourceCount":       catalogSourceCount,
 		"stateHealthy":             stateHealthy,
-		"aria2":                    detectAria2(),
+		"aria2":                    detectAria2At(a.aria2Path),
 		"importSources":            sources,
 		"importSourceCount":        sourceCount,
 		"importRuns":               runs,
@@ -1258,8 +1286,10 @@ func (a *App) handleAdminImportReferences(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = a.state.Audit("import_reference_recorded", fmt.Sprintf("kind=%s info_hash=%s", item.Kind, item.InfoHash))
-	writeJSON(w, map[string]any{"reference": item})
+	status := a.startReferenceDownload(item.ID, parsed.Reference)
+	a.applyDownloadStatus(&item, status)
+	_ = a.state.Audit("import_reference_recorded", fmt.Sprintf("kind=%s info_hash=%s download=%s", item.Kind, item.InfoHash, status.Status))
+	writeJSON(w, map[string]any{"reference": item, "download": status})
 }
 
 func (a *App) handleAdminImportReferencesList(w http.ResponseWriter, r *http.Request) {
@@ -1268,7 +1298,82 @@ func (a *App) handleAdminImportReferencesList(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	for i := range items {
+		if status, ok := a.downloadStatus(items[i].ID); ok {
+			a.applyDownloadStatus(&items[i], status)
+		}
+	}
 	writeJSON(w, map[string]any{"items": items})
+}
+
+func (a *App) startReferenceDownload(id int64, reference string) downloadStatus {
+	aria2Path := a.aria2Path
+	if aria2Path == "" {
+		status := downloadStatus{Status: "client_unavailable", Error: "aria2c is not installed or not configured; install aria2c or set APP_ARIA2_PATH"}
+		a.setDownloadStatus(id, status)
+		return status
+	}
+	if err := os.MkdirAll(a.downloadDir, 0o700); err != nil {
+		status := downloadStatus{Status: "not_started", Directory: a.downloadDir, Error: fmt.Sprintf("create download directory: %v", err)}
+		a.setDownloadStatus(id, status)
+		return status
+	}
+	logPath := filepath.Join(a.downloadDir, "whop2p-aria2.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		status := downloadStatus{Status: "not_started", Directory: a.downloadDir, Error: fmt.Sprintf("open download log: %v", err)}
+		a.setDownloadStatus(id, status)
+		return status
+	}
+	command := exec.Command(aria2Path,
+		"--dir="+a.downloadDir,
+		"--continue=true",
+		"--auto-file-renaming=true",
+		"--allow-overwrite=false",
+		reference,
+	)
+	command.Stdout = logFile
+	command.Stderr = logFile
+	if err := command.Start(); err != nil {
+		_ = logFile.Close()
+		status := downloadStatus{Status: "not_started", Directory: a.downloadDir, Error: fmt.Sprintf("start aria2c: %v", err)}
+		a.setDownloadStatus(id, status)
+		return status
+	}
+	status := downloadStatus{Status: "started", Started: true, PID: command.Process.Pid, Directory: a.downloadDir}
+	a.setDownloadStatus(id, status)
+	go func() {
+		err := command.Wait()
+		_ = logFile.Close()
+		completed := downloadStatus{Status: "completed", Directory: a.downloadDir}
+		if err != nil {
+			completed.Status = "failed"
+			completed.Error = err.Error()
+		}
+		a.setDownloadStatus(id, completed)
+		_ = a.state.Audit("import_reference_download_finished", fmt.Sprintf("id=%d status=%s error=%v", id, completed.Status, err))
+	}()
+	return status
+}
+
+func (a *App) setDownloadStatus(id int64, status downloadStatus) {
+	a.downloadMu.Lock()
+	a.downloads[id] = status
+	a.downloadMu.Unlock()
+}
+
+func (a *App) downloadStatus(id int64) (downloadStatus, bool) {
+	a.downloadMu.RLock()
+	status, ok := a.downloads[id]
+	a.downloadMu.RUnlock()
+	return status, ok
+}
+
+func (a *App) applyDownloadStatus(item *state.ImportReference, status downloadStatus) {
+	item.DownloadStatus = status.Status
+	item.DownloadPID = status.PID
+	item.DownloadDir = status.Directory
+	item.DownloadError = status.Error
 }
 
 func (a *App) handleAdminCatalogSources(w http.ResponseWriter, r *http.Request) {

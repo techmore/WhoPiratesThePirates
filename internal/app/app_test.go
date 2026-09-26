@@ -1666,7 +1666,7 @@ func newTestApp(t *testing.T, password string) (*App, string, string) {
 	statePath := filepath.Join(t.TempDir(), "state.sqlite")
 	seedCatalog(t, catalogPath)
 
-	a, err := New(catalogPath, statePath)
+	a, err := NewWithOptions(catalogPath, statePath, Options{DownloadClientPath: filepath.Join(t.TempDir(), "missing-aria2c")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2258,6 +2258,64 @@ func TestAdminImportReferenceRecordsMagnetMetadataOnly(t *testing.T) {
 	}
 	if len(payload.Items) != 1 || payload.Items[0].Kind != "magnet" || payload.Items[0].InfoHash == "" || payload.Items[0].Name != "Ubuntu 24.04" {
 		t.Fatalf("unexpected import reference payload: %#v", payload)
+	}
+}
+
+func TestAdminImportReferenceStartsConfiguredDownloadClient(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	argsPath := filepath.Join(t.TempDir(), "aria2-args.txt")
+	scriptPath := filepath.Join(t.TempDir(), "aria2c")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$APP_TEST_ARIA2_ARGS\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APP_TEST_ARIA2_ARGS", argsPath)
+	a.aria2Path = scriptPath
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	magnet := "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+	form := url.Values{"reference": []string{magnet}}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-references", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected import reference status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Download struct {
+			Started   bool   `json:"started"`
+			Directory string `json:"directory"`
+		} `json:"download"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Download.Started || payload.Download.Directory == "" {
+		t.Fatalf("expected configured download client to start: %#v", payload)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(argsPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("configured download client was not invoked")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), magnet) || !strings.Contains(string(args), "--dir="+payload.Download.Directory) {
+		t.Fatalf("unexpected download client arguments: %q", string(args))
 	}
 }
 

@@ -20,19 +20,19 @@ is also installed.
 - Publish approved catalog-backup magnets in a customer dropdown
 - Switch the running browser to a validated local backup from the admin panel
 - Run a private admin surface with audit logging
-- Record operator-authorized magnet or `.torrent` references as metadata
-- Detect whether an external `aria2c` binary is available
+- Start operator-authorized magnet or `.torrent` downloads through `aria2c`
+- Track external download status in the admin surface
 - Deploy on macOS, Ubuntu, or an Apple `container machine`
 
 ## What it does not do
 
-`whop2p` does not fetch, mirror, seed, or automatically download content. It
-does not contact trackers or acquire data from sources the operator is not
-authorized to use.
+`whop2p` does not mirror, seed, or create torrents. Downloads are opt-in from
+the admin import form and delegated to `aria2c`; only use references for
+content you own or are explicitly authorized to retrieve.
 
 External torrent clients such as `aria2c` or qBittorrent may be used for
-content you own or are explicitly authorized to use. The server only reports
-whether `aria2c` is installed; it never invokes it.
+content you own or are explicitly authorized to use. The admin import flow
+invokes `aria2c` when it is installed or configured with `APP_ARIA2_PATH`.
 
 The catalog database is not committed to this repository. Provide an authorized
 backup through `whop2p load-catalog` or `APP_DB_PATH`.
@@ -191,6 +191,8 @@ torrent; an approved torrent client must already seed the magnet customers use.
 | `PORT` | Listen port | `8080` |
 | `ADMIN_PASSWORD` | Optional admin login password; unset enables local no-password mode | unset |
 | `ADMIN_SESSION_SECRET` | HMAC session secret | random per process |
+| `APP_ARIA2_PATH` | Explicit `aria2c` executable path | auto-detected |
+| `APP_DOWNLOAD_DIR` | Directory for started downloads | state-directory `downloads` |
 | `APP_TLS_CERT_FILE` | Direct TLS certificate | unset |
 | `APP_TLS_KEY_FILE` | Direct TLS key | unset |
 | `APP_COOKIE_SECURE` | Secure cookies behind trusted TLS proxy | unset |
@@ -235,22 +237,22 @@ network.
 - `/api/admin/import-sources/*` — approved source records
 - `/api/admin/import-runs/*` — import run records
 - `/api/admin/import-manifests/*` — validated manifest records
-- `/api/admin/import-references` — record authorized magnet or `.torrent` metadata
-- `/api/admin/import-references/list` — list recorded metadata references
+- `/api/admin/import-references` — start an authorized magnet or `.torrent` download
+- `/api/admin/import-references/list` — list references and download status
 - `/api/admin/catalog-sources` — manage recovery catalog labels, magnets, and local paths
 - `/api/admin/catalog-sources/upload` — upload, validate, register, and optionally load a SQLite recovery catalog
 - `/api/admin/catalog-sources/load` — validate and live-load a local catalog backup
 
 ### External reference import
 
-The admin UI includes an **Import External Reference** action with a Heroicon.
+The admin UI includes a **Download External Reference** action with a Heroicon.
 It accepts:
 
 - `magnet:?xt=urn:btih:...` references with a valid v1 info hash
 - `https://.../*.torrent` URLs
 
-It records the reference and parsed metadata in app state. It does not fetch
-the URL, contact a tracker, invoke `aria2c`, or write to the read-only catalog.
+It records the reference and parsed metadata in app state, then starts
+`aria2c` with the reference. It does not write to the read-only catalog.
 
 ## Development
 

@@ -31,14 +31,14 @@
       </div>
     </div>
     <div class="card" id="import-references">
-      {{template "sectiontitle" "Import External Reference"}}
-      <p class="muted">Record an operator-authorized magnet or .torrent URL as metadata. This does not contact trackers or download content.</p>
+      {{template "sectiontitle" "Download External Reference"}}
+      <p class="muted">Paste an operator-authorized magnet or .torrent URL to start aria2c immediately. Downloads are written to the configured download directory and tracked here.</p>
       <form id="import-reference-form" action="/api/admin/import-references" method="post" class="form-section">
         <label for="import-reference">Magnet URI or authorized .torrent URL</label>
         <input id="import-reference" name="reference" required placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent">
         <button type="submit">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-          Import reference
+          Start Download
         </button>
         <div id="import-reference-status" class="muted"></div>
       </form>
@@ -1030,20 +1030,30 @@
               if (!response.ok) return;
               const data = await response.json();
               referenceList.innerHTML = (data.items || []).map(function(item) {
-                return '<div class="kv"><div><strong>' + escapeReference(item.kind) + '</strong><div class="muted">' + escapeReference(item.name || item.infoHash || item.reference) + '</div><div class="muted">' + escapeReference(item.reference) + '</div></div><span class="muted">' + (item.infoHash || 'metadata only') + '</span></div>';
+                const status = item.downloadStatus ? 'Download: ' + item.downloadStatus : 'Not started';
+                const detail = item.downloadError ? ' · ' + item.downloadError : '';
+                return '<div class="kv"><div><strong>' + escapeReference(item.kind) + '</strong><div class="muted">' + escapeReference(item.name || item.infoHash || item.reference) + '</div><div class="muted">' + escapeReference(item.reference) + '</div></div><span class="muted">' + escapeReference(status + detail) + '</span></div>';
               }).join('') || '<div class="kv"><span>External references</span><span class="muted">No references recorded.</span></div>';
             };
             referenceForm.addEventListener('submit', async function(event) {
               event.preventDefault();
-              referenceStatus.textContent = 'Recording reference...';
+              referenceStatus.textContent = 'Starting download...';
               const response = await fetch(referenceForm.action, { method: 'POST', body: new FormData(referenceForm) });
               const text = await response.text();
               if (!response.ok) {
                 referenceStatus.textContent = text;
                 return;
               }
+              let data = {};
+              try { data = JSON.parse(text); } catch (error) {}
               referenceForm.reset();
-              referenceStatus.textContent = 'Reference recorded as metadata.';
+              if (data.download && data.download.started) {
+                referenceStatus.textContent = 'Download started. Files are being saved to ' + data.download.directory + '.';
+              } else if (data.download && data.download.error) {
+                referenceStatus.textContent = 'Reference saved, but download did not start: ' + data.download.error;
+              } else {
+                referenceStatus.textContent = 'Reference saved.';
+              }
               loadReferences();
             });
             loadReferences();

@@ -53,13 +53,17 @@ type ImportManifest struct {
 }
 
 type ImportReference struct {
-	ID        int64  `json:"id"`
-	Kind      string `json:"kind"`
-	Reference string `json:"reference"`
-	InfoHash  string `json:"infoHash,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Trackers  string `json:"trackers,omitempty"`
-	CreatedAt int64  `json:"createdAt"`
+	ID             int64  `json:"id"`
+	Kind           string `json:"kind"`
+	Reference      string `json:"reference"`
+	InfoHash       string `json:"infoHash,omitempty"`
+	Name           string `json:"name,omitempty"`
+	Trackers       string `json:"trackers,omitempty"`
+	CreatedAt      int64  `json:"createdAt"`
+	DownloadStatus string `json:"downloadStatus,omitempty"`
+	DownloadPID    int    `json:"downloadPid,omitempty"`
+	DownloadDir    string `json:"downloadDir,omitempty"`
+	DownloadError  string `json:"downloadError,omitempty"`
 }
 
 // CatalogSource is an operator-managed recovery entry. Magnet is the
