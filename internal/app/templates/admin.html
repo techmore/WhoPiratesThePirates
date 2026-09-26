@@ -609,12 +609,13 @@
               statusLogout.textContent = data.lastLogoutAt ? 'Last logout audit: ' + data.lastLogoutAt : 'Last logout audit: none';
               const transferReady = Boolean(data.aria2 && data.aria2.installed);
               const catalogReady = Boolean(data.catalogHealthy);
+              const recoveryLoaded = catalogReady && data.catalogName && data.catalogName !== 'Configured catalog';
               const sourceCount = data.catalogSourceCount || 0;
               if (adminTransferState) adminTransferState.textContent = transferReady ? 'Ready' : 'Unavailable';
-              if (adminCatalogState) adminCatalogState.textContent = catalogReady ? 'Loaded' : 'Needs file';
+              if (adminCatalogState) adminCatalogState.textContent = recoveryLoaded ? 'Recovery loaded' : (catalogReady ? 'Base catalog' : 'Needs file');
               if (adminSourceState) adminSourceState.textContent = sourceCount + ' published';
               setWorkflowState(workflowValidateState, sourceCount ? 'Source registered' : 'Awaiting file', sourceCount ? 'is-ready' : '');
-              setWorkflowState(workflowLoadState, catalogReady ? 'Loaded' : 'Ready when validated', catalogReady ? 'is-ready' : '');
+              setWorkflowState(workflowLoadState, recoveryLoaded ? 'Loaded' : 'Ready when validated', recoveryLoaded ? 'is-ready' : '');
               statusHealth.innerHTML = [
                 '<div class="kv"><span>Catalog DB</span><span class="muted">' + ((data.catalogHealthy ? 'healthy' : 'degraded')) + '</span></div>',
                 '<div class="kv"><span>State DB</span><span class="muted">' + ((data.stateHealthy ? 'healthy' : 'degraded')) + '</span></div>',
@@ -1115,10 +1116,11 @@
               const items = data.items || [];
               const active = items.some(function(item) { return item.downloadStatus === 'started' || item.downloadStatus === 'running'; });
               const failed = items.some(function(item) { return item.downloadError || item.downloadStatus === 'error'; });
-              setWorkflowState(workflowDownloadState, active ? 'In progress' : (items.length ? 'Submitted' : 'Ready'), active ? 'is-active' : (failed ? 'is-error' : (items.length ? 'is-ready' : '')));
+              const recorded = items.some(function(item) { return !item.downloadStatus; });
+              setWorkflowState(workflowDownloadState, active ? 'In progress' : (failed ? 'Attention' : (recorded ? 'Recorded' : (items.length ? 'Submitted' : 'Ready'))), active ? 'is-active' : (failed ? 'is-error' : (items.length ? 'is-ready' : '')));
               magnetList.innerHTML = items.map(function(item) {
-                const rawStatus = item.downloadStatus || 'not started';
-                const status = rawStatus === 'started' || rawStatus === 'running' ? 'In progress' : rawStatus;
+                const rawStatus = item.downloadStatus || 'recorded';
+                const status = rawStatus === 'recorded' ? 'Recorded' : (rawStatus === 'started' || rawStatus === 'running' ? 'In progress' : rawStatus);
                 const detail = item.downloadError ? ' · ' + item.downloadError : '';
                 const tone = item.downloadError || rawStatus === 'error' ? 'is-error' : (rawStatus === 'started' || rawStatus === 'running' ? 'is-active' : 'is-ready');
                 const directory = item.downloadDir ? '<div class="muted">Saving to ' + escapeMagnet(item.downloadDir) + '</div>' : '';
