@@ -121,4 +121,21 @@ func TestCatalogQueries(t *testing.T) {
 	if total != 2 || len(results) != 0 {
 		t.Fatalf("expected invalid page bounds to return no rows safely, total=%d results=%#v", total, results)
 	}
+
+	indexPath := filepath.Join(t.TempDir(), "search-index.sqlite")
+	if err := BuildSearchIndex(path, indexPath); err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := OpenWithSearchIndex(path, indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer indexed.Close()
+	results, total, err = indexed.SearchPage("hello", "", "newest", "desc", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(results) != 1 || results[0].Name != "Test Torrent" {
+		t.Fatalf("unexpected indexed search results: total=%d results=%#v", total, results)
+	}
 }

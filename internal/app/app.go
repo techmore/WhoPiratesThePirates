@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,7 @@ type App struct {
 	catalogRevision  uint64
 	version          string
 	recoveryDir      string
+	searchIndexDir   string
 	downloadDir      string
 	aria2Path        string
 	archiveExtractor string
@@ -121,22 +123,46 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 
 	selectedPath := dbPath
 	selectedName := "Configured catalog"
+	activePath := ""
 	active, err := st.ActiveCatalog()
 	if err != nil {
 		_ = st.Close()
 		return nil, err
 	}
 	if strings.TrimSpace(active.Path) != "" {
-		if err := catalog.Validate(active.Path); err == nil {
-			selectedPath = active.Path
-			if strings.TrimSpace(active.Name) != "" {
-				selectedName = active.Name
-			}
-		} else {
-			_ = st.ClearActiveCatalog()
+		activePath = active.Path
+		selectedPath = active.Path
+		if strings.TrimSpace(active.Name) != "" {
+			selectedName = active.Name
 		}
 	}
-	db, err := catalog.Open(selectedPath)
+	searchIndexDir := filepath.Join(filepath.Dir(statePath), "search-index")
+	searchIndexPath := ""
+	if activePath != "" {
+		searchIndexPath = catalogSearchIndexPath(searchIndexDir, selectedPath)
+		if _, err := os.Stat(searchIndexPath); os.IsNotExist(err) {
+			if err := catalog.BuildSearchIndex(selectedPath, searchIndexPath); err != nil {
+				_ = st.ClearActiveCatalog()
+				activePath = ""
+				selectedPath = dbPath
+				selectedName = "Configured catalog"
+				searchIndexPath = ""
+			}
+		} else if err != nil {
+			_ = st.ClearActiveCatalog()
+			activePath = ""
+			selectedPath = dbPath
+			selectedName = "Configured catalog"
+			searchIndexPath = ""
+		}
+	}
+	db, err := catalog.OpenWithSearchIndex(selectedPath, searchIndexPath)
+	if err != nil && activePath != "" {
+		_ = st.ClearActiveCatalog()
+		selectedPath = dbPath
+		selectedName = "Configured catalog"
+		db, err = catalog.Open(dbPath)
+	}
 	if err != nil {
 		_ = st.Close()
 		return nil, err
@@ -174,6 +200,7 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 		catalogRevision:  1,
 		version:          releaseVersion,
 		recoveryDir:      filepath.Join(filepath.Dir(statePath), "recovery-catalogs"),
+		searchIndexDir:   searchIndexDir,
 		downloadDir:      configuredDownloadDir(statePath),
 		aria2Path:        aria2Path,
 		archiveExtractor: archiveExtractor,
@@ -1944,7 +1971,11 @@ func (a *App) replaceCatalog(path, name string) error {
 }
 
 func (a *App) replaceCatalogValidated(path, name string) error {
-	next, err := catalog.Open(path)
+	searchIndexPath, err := a.ensureSearchIndex(path)
+	if err != nil {
+		return fmt.Errorf("build catalog search index: %w", err)
+	}
+	next, err := catalog.OpenWithSearchIndex(path, searchIndexPath)
 	if err != nil {
 		return fmt.Errorf("open catalog: %w", err)
 	}
@@ -1999,6 +2030,26 @@ func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func catalogSearchIndexPath(directory, catalogPath string) string {
+	digest := sha256.Sum256([]byte(filepath.Clean(catalogPath)))
+	return filepath.Join(directory, hex.EncodeToString(digest[:])+".sqlite")
+}
+
+func (a *App) ensureSearchIndex(catalogPath string) (string, error) {
+	indexPath := catalogSearchIndexPath(a.searchIndexDir, catalogPath)
+	if info, err := os.Stat(indexPath); err == nil {
+		if !info.IsDir() && info.Size() > 0 {
+			return indexPath, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := catalog.BuildSearchIndex(catalogPath, indexPath); err != nil {
+		return "", err
+	}
+	return indexPath, nil
 }
 
 func securityHeaders(next http.Handler) http.Handler {

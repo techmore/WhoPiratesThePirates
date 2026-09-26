@@ -11,7 +11,8 @@ import (
 )
 
 type Catalog struct {
-	db *sql.DB
+	db            *sql.DB
+	searchIndexed bool
 }
 
 type Category struct {
@@ -62,6 +63,23 @@ func Open(path string) (*Catalog, error) {
 		return nil, err
 	}
 	return &Catalog{db: db}, nil
+}
+
+func OpenWithSearchIndex(path, indexPath string) (*Catalog, error) {
+	catalog, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(indexPath) == "" {
+		return catalog, nil
+	}
+	indexURI := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", indexPath)
+	if _, err := catalog.db.Exec(`attach database ? as search_index`, indexURI); err != nil {
+		_ = catalog.Close()
+		return nil, fmt.Errorf("attach search index: %w", err)
+	}
+	catalog.searchIndexed = true
+	return catalog, nil
 }
 
 // Validate checks that path is an intact, non-empty catalog that exposes the
@@ -156,9 +174,10 @@ func (c *Catalog) Categories() ([]Category, error) {
 }
 
 func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset int) ([]Torrent, error) {
-	orderBy, where, args := searchQuery(q, category, sortField, sortDir)
+	indexed := c.searchIndexed && strings.TrimSpace(q) != ""
+	orderBy, where, args := searchQueryFor(q, category, sortField, sortDir, indexed)
 	limit, offset = normalizePage(limit, offset)
-	return c.searchItems(orderBy, where, args, limit, offset)
+	return c.searchItems(orderBy, where, args, indexed, limit, offset)
 }
 
 // SearchPage returns one page of results and the total number of matching
@@ -166,22 +185,31 @@ func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset i
 // with the same predicate as the page query rather than relying on a derived
 // table that may not exist in the source database.
 func (c *Catalog) SearchPage(q, category, sortField, sortDir string, limit, offset int) ([]Torrent, int64, error) {
-	orderBy, where, args := searchQuery(q, category, sortField, sortDir)
+	indexed := c.searchIndexed && strings.TrimSpace(q) != ""
+	orderBy, where, args := searchQueryFor(q, category, sortField, sortDir, indexed)
 	limit, offset = normalizePage(limit, offset)
 
 	var total int64
-	if err := c.db.QueryRow(`select count(*) from torrents t left join categories c on c.id = t.category where `+strings.Join(where, ` and `), args...).Scan(&total); err != nil {
+	searchJoin := ""
+	if indexed {
+		searchJoin = ` join search_index.torrent_search on search_index.torrent_search.rowid = t.id`
+	}
+	if err := c.db.QueryRow(`select count(*) from torrents t`+searchJoin+` left join categories c on c.id = t.category where `+strings.Join(where, ` and `), args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
-	items, err := c.searchItems(orderBy, where, args, limit, offset)
+	items, err := c.searchItems(orderBy, where, args, indexed, limit, offset)
 	return items, total, err
 }
 
-func (c *Catalog) searchItems(orderBy string, where []string, args []any, limit, offset int) ([]Torrent, error) {
+func (c *Catalog) searchItems(orderBy string, where []string, args []any, useSearchIndex bool, limit, offset int) ([]Torrent, error) {
+	searchJoin := ""
+	if useSearchIndex {
+		searchJoin = ` join search_index.torrent_search on search_index.torrent_search.rowid = t.id`
+	}
 	query := `
 		select t.id, t.category, t.status, t.name, t.numFiles, t.size, t.seeders, t.leechers, t.username, t.added, t.description, t.imdb, t.language, t.textLanguage, t.infoHash, coalesce(c.name, '')
-		from torrents t
+		from torrents t` + searchJoin + `
 		left join categories c on c.id = t.category
 		where ` + strings.Join(where, ` and `) + ` order by ` + orderBy + ` limit ? offset ?`
 	queryArgs := append(append([]any{}, args...), limit, offset)
@@ -219,6 +247,10 @@ func normalizePage(limit, offset int) (int, int) {
 }
 
 func searchQuery(q, category, sortField, sortDir string) (string, []string, []any) {
+	return searchQueryFor(q, category, sortField, sortDir, false)
+}
+
+func searchQueryFor(q, category, sortField, sortDir string, useSearchIndex bool) (string, []string, []any) {
 	orderBy := "seeders desc, added desc"
 	dir := "asc"
 	if strings.EqualFold(sortDir, "desc") {
@@ -247,13 +279,32 @@ func searchQuery(q, category, sortField, sortDir string) (string, []string, []an
 	args := make([]any, 0, 6)
 	args = append(args, category, category)
 	if q = strings.TrimSpace(q); q != "" {
-		// LIKE keeps the catalog connection strictly read-only. Any future FTS
-		// acceleration belongs in an application-owned derived database.
-		where = append(where, `(coalesce(t.name, '') like ? escape '\' or coalesce(t.description, '') like ? escape '\' or coalesce(t.infoHash, '') like ? escape '\')`)
-		pattern := "%" + escapeLike(q) + "%"
-		args = append(args, pattern, pattern, pattern)
+		if useSearchIndex {
+			where = append(where, `search_index.torrent_search.content match ?`)
+			args = append(args, ftsQuery(q))
+		} else {
+			// LIKE keeps the catalog connection strictly read-only when no derived
+			// search index has been built yet.
+			where = append(where, `(coalesce(t.name, '') like ? escape '\' or coalesce(t.description, '') like ? escape '\' or coalesce(t.infoHash, '') like ? escape '\')`)
+			pattern := "%" + escapeLike(q) + "%"
+			args = append(args, pattern, pattern, pattern)
+		}
 	}
 	return orderBy, where, args
+}
+
+func ftsQuery(q string) string {
+	parts := make([]string, 0)
+	for _, part := range strings.Fields(q) {
+		part = strings.ReplaceAll(part, `"`, `""`)
+		if part != "" {
+			parts = append(parts, `"`+part+`"`)
+		}
+	}
+	if len(parts) == 0 {
+		return `*`
+	}
+	return strings.Join(parts, " AND ")
 }
 
 func escapeLike(s string) string {
