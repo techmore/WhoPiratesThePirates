@@ -1,0 +1,24 @@
+# Build from the repository root:
+#   make container-build
+FROM alpine:3.22
+
+RUN addgroup -S whop2p \
+    && adduser -S -G whop2p -h /var/lib/whop2p whop2p \
+    && mkdir -p /var/lib/whop2p \
+    && chown -R whop2p:whop2p /var/lib/whop2p
+
+COPY bin/whop2p-linux-arm64 /usr/local/bin/whop2p
+COPY deploy/container/entrypoint.sh /usr/local/bin/entrypoint
+
+RUN chmod 0755 /usr/local/bin/whop2p /usr/local/bin/entrypoint
+
+ENV WHOP2P_HOME=/var/lib/whop2p \
+    APP_DB_PATH=/var/lib/whop2p/catalog.sqlite \
+    APP_STATE_PATH=/var/lib/whop2p/app_state.sqlite \
+    APP_BIND_ADDR=0.0.0.0 \
+    PORT=8080 \
+    APP_ALLOW_INSECURE_HTTP=true
+
+USER whop2p
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/entrypoint"]
