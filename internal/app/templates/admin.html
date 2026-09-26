@@ -1,7 +1,31 @@
 {{define "title"}}Admin{{end}}
 {{define "body"}}
-  <div class="card">
-      {{template "panelhead" (dict "Eyebrow" "Operational panel" "Title" "Admin" "Subtitle" "Secure settings for Tor mode and startup behavior." "ActionHref" "/" "ActionLabel" "Back to catalog")}}
+  <div class="card admin-section" id="admin-overview">
+      {{template "panelhead" (dict "Eyebrow" "Operational panel" "Title" "Admin" "Subtitle" "Download, validate, and load an authorized recovery catalog." "ActionHref" "/" "ActionLabel" "Back to catalog")}}
+      <div class="admin-hero">
+        <div class="admin-hero-copy">
+          <div class="section-eyebrow" style="color:var(--olive-300);">Recovery operations</div>
+          <h2>Bring a backup online</h2>
+          <p>Start a trusted magnet transfer, confirm the recovered SQLite file, then switch catalog searches to the loaded database.</p>
+          <div class="admin-hero-actions">
+            <a class="pill active" href="#recovery-workflow">Start recovery workflow</a>
+            <a class="pill" href="#catalog-source-admin">Manage catalog sources</a>
+          </div>
+        </div>
+        <div class="admin-hero-grid" aria-label="Recovery system status">
+          <div class="admin-hero-stat"><span>Transfer</span><strong id="admin-transfer-state">Checking…</strong><small>aria2c client</small></div>
+          <div class="admin-hero-stat"><span>Catalog</span><strong id="admin-catalog-state">Checking…</strong><small>active search database</small></div>
+          <div class="admin-hero-stat"><span>Sources</span><strong id="admin-source-state">Checking…</strong><small>customer recovery links</small></div>
+        </div>
+      </div>
+      <nav class="admin-nav" aria-label="Admin sections">
+        <a href="#recovery-workflow">01 Workflow</a>
+        <a href="#magnet-download">02 Download</a>
+        <a href="#catalog-source-admin">03 Catalog</a>
+        <a href="#admin-settings">Settings</a>
+        <a href="#import-state">Imports</a>
+        <a href="#audit-log">Audit</a>
+      </nav>
       <div class="statusline">
         <div class="stat"><div class="k">Tor enabled</div><div class="v">{{if .TorEnabled}}Yes{{else}}No{{end}}</div></div>
         <div class="stat"><div class="k">Tor mode</div><div class="v">{{.TorMode}}</div></div>
@@ -30,8 +54,39 @@
         <div id="status-health" class="side-list" style="margin-top:10px;"></div>
       </div>
     </div>
+    <div class="card admin-section workflow-panel" id="recovery-workflow">
+      <div class="panel-head">
+        <div>
+          <div class="muted section-eyebrow">Recovery workflow</div>
+          <h2 class="section-title section-title-small" style="margin:0;">Download → validate → load</h2>
+          <div class="muted">Each step leaves the previous artifact in place so the recovery path is easy to inspect and repeat.</div>
+        </div>
+        <span class="status-badge"><span class="status-dot live"></span> Operator runbook</span>
+      </div>
+      <div class="workflow-grid">
+        <a class="workflow-step" href="#magnet-download">
+          <span class="workflow-step-number">01</span>
+          <span><strong>Download the archive</strong><p>Paste a magnet or authorized torrent URL and let aria2c save it locally.</p></span>
+          <span id="workflow-download-state" class="workflow-state">Ready</span>
+        </a>
+        <a class="workflow-step" href="#catalog-source-admin">
+          <span class="workflow-step-number">02</span>
+          <span><strong>Validate the database</strong><p>Register the SQLite path or upload a backup, then verify its schema.</p></span>
+          <span id="workflow-validate-state" class="workflow-state">Awaiting file</span>
+        </a>
+        <a class="workflow-step" href="#catalog-load-form">
+          <span class="workflow-step-number">03</span>
+          <span><strong>Load and refresh search</strong><p>Load the approved source to make the recovered catalog searchable.</p></span>
+          <span id="workflow-load-state" class="workflow-state">Ready when validated</span>
+        </a>
+      </div>
+      <div class="workflow-note"><strong>Operator path</strong><span>When the transfer finishes, extract the archive until you have a local <code>.sqlite</code> or <code>.db</code> file, then use the Catalog step below. The customer dropdown only shows sources explicitly marked enabled.</span></div>
+    </div>
     <div class="card" id="magnet-download">
-      {{template "sectiontitle" "Download Magnet"}}
+      <div class="section-heading">
+        {{template "sectiontitle" "Download Magnet"}}
+        <span class="status-badge"><span class="status-dot live"></span> aria2c dispatch</span>
+      </div>
       <p class="muted">Paste an operator-authorized magnet or .torrent URL to start aria2c immediately. Downloads are written to the configured download directory and tracked here.</p>
       <form id="magnet-download-form" action="/api/admin/import-references" method="post" class="form-section">
         <label for="magnet-download-input">Magnet URI or authorized .torrent URL</label>
@@ -40,12 +95,15 @@
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
           Download
         </button>
-        <div id="magnet-download-status" class="muted"></div>
+        <div id="magnet-download-status" class="muted" role="status" aria-live="polite"></div>
       </form>
       <div id="magnet-download-list" class="side-list" style="margin-top:12px;"></div>
     </div>
-    <div class="card" id="catalog-source-admin">
-      {{template "sectiontitle" "Catalog Recovery Sources"}}
+    <div class="card admin-section" id="catalog-source-admin">
+      <div class="section-heading">
+        {{template "sectiontitle" "Catalog Recovery Sources"}}
+        <span class="status-badge"><span class="status-dot warn"></span> Validate before load</span>
+      </div>
       <p class="muted">Upload an authorized SQLite backup, attach the customer download magnet, and optionally load the validated database immediately. The app stores the backup read-only; an approved torrent client must seed the matching magnet.</p>
       <div class="card" style="margin-top:14px;padding:16px;background:var(--surface-strong);">
         <div class="panel-head" style="margin-bottom:10px;">
@@ -72,7 +130,8 @@
           <button type="submit">Upload and Publish Recovery Catalog</button>
         </form>
       </div>
-      <div class="muted" style="margin-top:18px;">Already have the database on this machine? Register its path below instead of uploading a second copy.</div>
+      <div class="subsection-label">Use a local file</div>
+      <div class="muted">Already have the database on this machine? Register its path below instead of uploading a second copy.</div>
       <form method="post" action="/api/admin/catalog-sources" class="form-section">
         <div class="form-grid">
           <div>
@@ -90,7 +149,8 @@
         <label class="check-label"><input type="checkbox" name="load_now" checked> Validate and load immediately when a local database path is provided</label>
         <button type="submit">Register Recovery Source</button>
       </form>
-      <form id="catalog-load-form" method="post" action="/api/admin/catalog-sources/load" class="form-section" style="margin-top:18px;border-top:1px solid var(--line-soft);padding-top:18px;">
+      <div class="subsection-label">Load into search</div>
+      <form id="catalog-load-form" method="post" action="/api/admin/catalog-sources/load" class="form-section" style="margin-top:0;border-top:1px solid var(--line-soft);padding-top:18px;">
         <div class="form-grid">
           <div>
             <label for="catalog-load-source">Load configured database</label>
@@ -105,7 +165,7 @@
           </div>
         </div>
         <button type="submit">Validate and Load Catalog</button>
-        <div id="catalog-load-status" class="muted"></div>
+        <div id="catalog-load-status" class="muted" role="status" aria-live="polite"></div>
       </form>
       <div class="side-list" style="margin-top:14px;">
         {{range .CatalogSources}}
@@ -139,7 +199,7 @@
         {{end}}
       </div>
     </div>
-    <div class="card">
+    <div class="card admin-section" id="admin-settings">
       {{template "sectiontitle" "Tor Settings"}}
       <p class="muted">Settings are stored in the app-owned SQLite state database. The catalog database remains read-only.</p>
       <form method="post" action="/api/admin/tor" class="form-section">
@@ -174,7 +234,7 @@
       </form>
       <form method="post" action="/api/admin/logout"><button type="submit" class="button-primary button-secondary">Logout</button></form>
   </div>
-  <div class="card">
+  <div class="card admin-section" id="import-state">
       {{template "sectiontitle" "Import State"}}
       <p class="muted">Approved import sources and runs are persisted in app state for later authorized ingestion work.</p>
       <form method="post" action="/api/admin/import-sources" class="form-section">
@@ -358,7 +418,7 @@
           <pre id="runs-detail-json" class="muted" style="white-space:pre-wrap;word-break:break-word;margin:0;max-width:100%;"></pre>
         </div>
       </div>
-        <div class="side-list">
+        <div class="side-list" id="audit-log">
         {{range .AuditEntries}}
           <div class="kv">
             <div>
@@ -432,7 +492,7 @@
         <button type="submit">Record Import Run</button>
       </form>
   </div>
-  <div class="card">
+  <div class="card admin-section" id="manifest-tools">
       {{template "sectiontitle" "Validate Manifest"}}
       <p class="muted">Paste an authorized manifest to validate relative file paths and compute a preview checksum before any ingest work.</p>
       <form id="manifest-preview-form" method="post" action="/api/admin/import-manifest/preview" class="form-section">
@@ -517,6 +577,17 @@
           const statusSession = document.getElementById('status-session');
           const statusLogin = document.getElementById('status-login');
           const statusLogout = document.getElementById('status-logout');
+          const adminTransferState = document.getElementById('admin-transfer-state');
+          const adminCatalogState = document.getElementById('admin-catalog-state');
+          const adminSourceState = document.getElementById('admin-source-state');
+          const workflowDownloadState = document.getElementById('workflow-download-state');
+          const workflowValidateState = document.getElementById('workflow-validate-state');
+          const workflowLoadState = document.getElementById('workflow-load-state');
+          const setWorkflowState = function(element, label, tone) {
+            if (!element) return;
+            element.textContent = label;
+            element.className = 'workflow-state' + (tone ? ' ' + tone : '');
+          };
           if (statusStats && statusMeta && statusHealth && statusRefresh && statusAuto && statusSession && statusLogin && statusLogout) {
             let statusTimer = null;
             async function loadStatus() {
@@ -536,6 +607,14 @@
               statusSession.textContent = 'Admin session epoch: ' + (data.adminSessionEpoch || 0);
               statusLogin.textContent = data.lastLoginAt ? 'Last login audit: ' + data.lastLoginAt : 'Last login audit: none';
               statusLogout.textContent = data.lastLogoutAt ? 'Last logout audit: ' + data.lastLogoutAt : 'Last logout audit: none';
+              const transferReady = Boolean(data.aria2 && data.aria2.installed);
+              const catalogReady = Boolean(data.catalogHealthy);
+              const sourceCount = data.catalogSourceCount || 0;
+              if (adminTransferState) adminTransferState.textContent = transferReady ? 'Ready' : 'Unavailable';
+              if (adminCatalogState) adminCatalogState.textContent = catalogReady ? 'Loaded' : 'Needs file';
+              if (adminSourceState) adminSourceState.textContent = sourceCount + ' published';
+              setWorkflowState(workflowValidateState, sourceCount ? 'Source registered' : 'Awaiting file', sourceCount ? 'is-ready' : '');
+              setWorkflowState(workflowLoadState, catalogReady ? 'Loaded' : 'Ready when validated', catalogReady ? 'is-ready' : '');
               statusHealth.innerHTML = [
                 '<div class="kv"><span>Catalog DB</span><span class="muted">' + ((data.catalogHealthy ? 'healthy' : 'degraded')) + '</span></div>',
                 '<div class="kv"><span>State DB</span><span class="muted">' + ((data.stateHealthy ? 'healthy' : 'degraded')) + '</span></div>',
@@ -1001,18 +1080,22 @@
             });
             catalogLoadForm.addEventListener('submit', async function(event) {
               event.preventDefault();
+              setWorkflowState(workflowLoadState, 'Loading', 'is-active');
               catalogLoadStatus.textContent = 'Validating and loading catalog...';
               const response = await fetch(catalogLoadForm.action, { method: 'POST', body: new FormData(catalogLoadForm) });
               const text = await response.text();
               if (!response.ok) {
                 catalogLoadStatus.textContent = text;
+                setWorkflowState(workflowLoadState, 'Load failed', 'is-error');
                 return;
               }
               try {
                 const data = JSON.parse(text);
                 catalogLoadStatus.textContent = 'Loaded ' + (data.source && data.source.name ? data.source.name : 'catalog') + '. Catalog searches now use the recovered database.';
+                setWorkflowState(workflowLoadState, 'Loaded', 'is-ready');
               } catch (error) {
                 catalogLoadStatus.textContent = 'Catalog loaded.';
+                setWorkflowState(workflowLoadState, 'Loaded', 'is-ready');
               }
             });
           }
@@ -1029,10 +1112,17 @@
               const response = await fetch('/api/admin/import-references/list');
               if (!response.ok) return;
               const data = await response.json();
-              magnetList.innerHTML = (data.items || []).map(function(item) {
-                const status = item.downloadStatus ? 'Download: ' + item.downloadStatus : 'Not started';
+              const items = data.items || [];
+              const active = items.some(function(item) { return item.downloadStatus === 'started' || item.downloadStatus === 'running'; });
+              const failed = items.some(function(item) { return item.downloadError || item.downloadStatus === 'error'; });
+              setWorkflowState(workflowDownloadState, active ? 'In progress' : (items.length ? 'Submitted' : 'Ready'), active ? 'is-active' : (failed ? 'is-error' : (items.length ? 'is-ready' : '')));
+              magnetList.innerHTML = items.map(function(item) {
+                const rawStatus = item.downloadStatus || 'not started';
+                const status = rawStatus === 'started' || rawStatus === 'running' ? 'In progress' : rawStatus;
                 const detail = item.downloadError ? ' · ' + item.downloadError : '';
-                return '<div class="kv"><div><strong>' + escapeMagnet(item.kind) + '</strong><div class="muted">' + escapeMagnet(item.name || item.infoHash || item.reference) + '</div><div class="muted">' + escapeMagnet(item.reference) + '</div></div><span class="muted">' + escapeMagnet(status + detail) + '</span></div>';
+                const tone = item.downloadError || rawStatus === 'error' ? 'is-error' : (rawStatus === 'started' || rawStatus === 'running' ? 'is-active' : 'is-ready');
+                const directory = item.downloadDir ? '<div class="muted">Saving to ' + escapeMagnet(item.downloadDir) + '</div>' : '';
+                return '<div class="kv download-item"><div class="download-meta"><strong>' + escapeMagnet(item.kind) + '</strong><div class="muted">' + escapeMagnet(item.name || item.infoHash || item.reference) + '</div><div class="muted magnet-link">' + escapeMagnet(item.reference) + '</div>' + directory + '</div><span class="workflow-state download-status ' + tone + '">' + escapeMagnet(status + detail) + '</span></div>';
               }).join('') || '<div class="kv"><span>Downloads</span><span class="muted">No magnets downloaded yet.</span></div>';
             };
             magnetForm.addEventListener('submit', async function(event) {
@@ -1057,6 +1147,7 @@
               loadMagnets();
             });
             loadMagnets();
+            setInterval(loadMagnets, 10000);
           }
         })();
       </script>
