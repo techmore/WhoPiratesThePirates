@@ -57,6 +57,29 @@ func (a *App) recoverReference(id int64, reference, name, preferredDir string) {
 		a.setRecoveryStatus(id, "recovering", "Waiting for a complete SQLite database or supported archive.", "", "")
 		return
 	}
+	if item.DownloadStatus != "completed" {
+		downloadDir := item.DownloadDir
+		if strings.TrimSpace(downloadDir) == "" {
+			downloadDir = preferredDir
+		}
+		completed := downloadStatus{
+			Status:         "completed",
+			Directory:      downloadDir,
+			RecoveryStatus: "recovering",
+			RecoveryDetail: "Downloaded artifact found; continuing with catalog recovery.",
+			CompletedBytes: item.DownloadCompletedBytes,
+			TotalBytes:     item.DownloadTotalBytes,
+			SpeedBytes:     0,
+			ETASeconds:     0,
+			Progress:       item.DownloadProgress,
+		}
+		if info, statErr := os.Stat(artifact); statErr == nil && info.Size() > 0 && completed.TotalBytes == 0 {
+			completed.CompletedBytes = info.Size()
+			completed.TotalBytes = info.Size()
+			completed.Progress = 100
+		}
+		a.setDownloadStatus(id, completed)
+	}
 
 	extractionDetail := fmt.Sprintf("Using downloaded SQLite database %s.", filepath.Base(artifact))
 	if !isCatalogArtifact(artifact) {
