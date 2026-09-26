@@ -488,19 +488,19 @@ band, section tabs, panels, dense record tables, and status tags.
     </div>
   </header>
 
-  <nav class="admin-tabs" aria-label="Admin sections">
-    <a href="#recovery-workflow" data-tab="recovery-workflow">Recovery</a>
-    <a href="#catalog-source-admin" data-tab="catalog-source-admin">Catalog</a>
-    <a href="#import-state" data-tab="import-state">Imports</a>
-    <a href="#manifest-tools" data-tab="manifest-tools">Manifests</a>
-    <a href="#audit-log" data-tab="audit-log">Audit</a>
-    <a href="#admin-settings" data-tab="admin-settings">Settings</a>
+  <nav class="admin-tabs" aria-label="Admin sections" role="tablist">
+    <a href="#recovery-workflow" data-tab="recovery-workflow" role="tab" id="tab-recovery-workflow" aria-controls="recovery-workflow">Recovery</a>
+    <a href="#catalog-source-admin" data-tab="catalog-source-admin" role="tab" id="tab-catalog-source-admin" aria-controls="catalog-source-admin">Catalog</a>
+    <a href="#import-state" data-tab="import-state" role="tab" id="tab-import-state" aria-controls="import-state">Imports</a>
+    <a href="#manifest-tools" data-tab="manifest-tools" role="tab" id="tab-manifest-tools" aria-controls="manifest-tools">Manifests</a>
+    <a href="#audit-log" data-tab="audit-log" role="tab" id="tab-audit-log" aria-controls="audit-log">Audit</a>
+    <a href="#admin-settings" data-tab="admin-settings" role="tab" id="tab-admin-settings" aria-controls="admin-settings">Settings</a>
   </nav>
 
   <div class="admin-panels">
 
     {{/* ---------------------------------------------------------- Recovery */}}
-    <section class="card admin-panel" id="recovery-workflow" data-panel="recovery-workflow" aria-label="Recovery workflow">
+    <section class="card admin-panel" id="recovery-workflow" data-panel="recovery-workflow" role="tabpanel" aria-labelledby="tab-recovery-workflow" tabindex="0" aria-label="Recovery workflow">
       <div class="panel-head">
         <div>
           <div class="muted section-eyebrow">Recovery workflow</div>
@@ -565,7 +565,11 @@ band, section tabs, panels, dense record tables, and status tags.
             <h3>Transfers and recovery</h3>
             <p class="panel-note">Every recorded reference, with its live download and recovery state.</p>
           </div>
-          <span class="downloads-refresh" id="magnet-list-meta">Refreshing&hellip;</span>
+          <div class="table-bar-controls">
+            <input type="search" id="magnet-q" placeholder="Filter transfers" aria-label="Filter transfers">
+            <label class="switch"><input type="checkbox" id="magnet-auto" checked> Auto</label>
+            <span class="downloads-refresh" id="magnet-list-meta">Refreshing&hellip;</span>
+          </div>
         </div>
         <div class="table-scroll">
           <table class="admin-table">
@@ -579,7 +583,7 @@ band, section tabs, panels, dense record tables, and status tags.
     </section>
 
     {{/* ----------------------------------------------------------- Catalog */}}
-    <section class="card admin-panel" id="catalog-source-admin" data-panel="catalog-source-admin" data-static="true" aria-label="Catalog recovery sources" hidden>
+    <section class="card admin-panel" id="catalog-source-admin" data-panel="catalog-source-admin" role="tabpanel" aria-labelledby="tab-catalog-source-admin" tabindex="0" data-static="true" aria-label="Catalog recovery sources" hidden>
       <div class="panel-head">
         <div>
           <div class="muted section-eyebrow">Catalog recovery sources</div>
@@ -710,7 +714,7 @@ band, section tabs, panels, dense record tables, and status tags.
     </section>
 
     {{/* ----------------------------------------------------------- Imports */}}
-    <section class="card admin-panel" id="import-state" data-panel="import-state" aria-label="Import state" hidden>
+    <section class="card admin-panel" id="import-state" data-panel="import-state" role="tabpanel" aria-labelledby="tab-import-state" tabindex="0" aria-label="Import state" hidden>
       <div class="panel-head">
         <div>
           <div class="muted section-eyebrow">Import state</div>
@@ -883,7 +887,7 @@ band, section tabs, panels, dense record tables, and status tags.
     </section>
 
     {{/* --------------------------------------------------------- Manifests */}}
-    <section class="card admin-panel" id="manifest-tools" data-panel="manifest-tools" aria-label="Manifest validation" hidden>
+    <section class="card admin-panel" id="manifest-tools" data-panel="manifest-tools" role="tabpanel" aria-labelledby="tab-manifest-tools" tabindex="0" aria-label="Manifest validation" hidden>
       <div class="panel-head">
         <div>
           <div class="muted section-eyebrow">Manifest validation</div>
@@ -1026,7 +1030,7 @@ band, section tabs, panels, dense record tables, and status tags.
     </section>
 
     {{/* -------------------------------------------------------------- Audit */}}
-    <section class="card admin-panel" id="audit-log" data-panel="audit-log" aria-label="Audit log" hidden>
+    <section class="card admin-panel" id="audit-log" data-panel="audit-log" role="tabpanel" aria-labelledby="tab-audit-log" tabindex="0" aria-label="Audit log" hidden>
       <div class="panel-head">
         <div>
           <div class="muted section-eyebrow">Audit log</div>
@@ -1073,7 +1077,7 @@ band, section tabs, panels, dense record tables, and status tags.
     </section>
 
     {{/* ----------------------------------------------------------- Settings */}}
-    <section class="card admin-panel" id="admin-settings" data-panel="admin-settings" aria-label="Admin settings" hidden>
+    <section class="card admin-panel" id="admin-settings" data-panel="admin-settings" role="tabpanel" aria-labelledby="tab-admin-settings" tabindex="0" aria-label="Admin settings" hidden>
       <div class="panel-head">
         <div>
           <div class="muted section-eyebrow">Settings</div>
@@ -1170,23 +1174,38 @@ band, section tabs, panels, dense record tables, and status tags.
       return { ok: response.ok, status: response.status, text: text, data: payload };
     }
 
-    /* Shared 30s tick so every auto-refresh control costs one timer. */
+    /* Shared tick so every auto-refresh control costs one timer. A ticker bound
+       to a panel only runs while that panel is on screen: a console left open
+       on Settings should not keep polling four record tables it cannot show. */
     const tickers = [];
-    function every(ms, run) {
-      const entry = { ms: ms, run: run, timer: null };
+    function every(ms, run, panelId) {
+      const entry = { ms: ms, run: run, timer: null, enabled: true, panel: panelId || '' };
       tickers.push(entry);
-      entry.timer = setInterval(run, ms);
+      restartTicker(entry);
       return entry;
+    }
+    function tickerActive(entry) {
+      if (entry.enabled === false) return false;
+      if (entry.panel && !panelIsVisible(entry.panel)) return false;
+      return true;
     }
     function restartTicker(entry) {
       if (entry.timer) clearInterval(entry.timer);
-      entry.timer = entry.enabled === false ? null : setInterval(entry.run, entry.ms);
+      entry.timer = null;
+      if (tickerActive(entry)) entry.timer = setInterval(entry.run, entry.ms);
+    }
+    function resumeTickers() {
+      tickers.forEach(restartTicker);
     }
 
     /* ----------------------------------------------------- section routing */
     const tabs = Array.prototype.slice.call(document.querySelectorAll('.admin-tabs a[data-tab]'));
     const panels = Array.prototype.slice.call(document.querySelectorAll('.admin-panel[data-panel]'));
     const STORED_PANEL = 'wptp.admin.panel';
+
+    function panelIsVisible(id) {
+      return panels.some(function(panel) { return panel.dataset.panel === id && !panel.hidden; });
+    }
 
     function showPanel(id, push) {
       const target = panels.filter(function(panel) { return panel.dataset.panel === id; })[0];
@@ -1195,16 +1214,18 @@ band, section tabs, panels, dense record tables, and status tags.
       panels.forEach(function(panel) { panel.hidden = panel !== active; });
       tabs.forEach(function(tab) {
         const current = tab.dataset.tab === active.dataset.panel;
-        if (current) {
-          tab.setAttribute('aria-current', 'true');
-        } else {
-          tab.removeAttribute('aria-current');
-        }
+        tab.setAttribute('aria-selected', current ? 'true' : 'false');
+        /* Roving tabindex: the tab strip is one stop in the tab order, and the
+           arrow keys move within it, as a tablist is expected to behave. */
+        tab.tabIndex = current ? 0 : -1;
+        if (current) tab.setAttribute('aria-current', 'true');
+        else tab.removeAttribute('aria-current');
       });
       try { sessionStorage.setItem(STORED_PANEL, active.dataset.panel); } catch (err) { /* storage is optional */ }
       if (push && window.location.hash.slice(1) !== active.id) {
         window.history.replaceState(null, '', '#' + active.id);
       }
+      resumeTickers();
     }
 
     function panelFor(hash) {
@@ -1221,6 +1242,22 @@ band, section tabs, panels, dense record tables, and status tags.
       tab.addEventListener('click', function() {
         showPanel(tab.dataset.tab, true);
       });
+    });
+
+    /* Arrow keys walk the tab strip, as a tablist is expected to. Selection
+       follows focus so the panel and the highlighted tab never disagree. */
+    document.querySelector('.admin-tabs').addEventListener('keydown', function(event) {
+      const current = tabs.indexOf(document.activeElement);
+      if (current < 0) return;
+      let next = null;
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (current + 1) % tabs.length;
+      else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (current - 1 + tabs.length) % tabs.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = tabs.length - 1;
+      if (next === null) return;
+      event.preventDefault();
+      tabs[next].focus();
+      showPanel(tabs[next].dataset.tab, true);
     });
     window.addEventListener('hashchange', function() {
       const hash = window.location.hash.slice(1);
@@ -1400,7 +1437,10 @@ band, section tabs, panels, dense record tables, and status tags.
     }
 
     if (statusStats && statusRefresh && statusAuto) {
-      const statusTicker = { ms: REFRESH_MS, run: loadStatus, timer: null, enabled: true };
+      /* The header strip is always on screen, so this ticker has no panel and
+         runs whenever auto-refresh is on. It needs arming here for the same
+         reason the record tables did: a checked box that never ticks is a lie. */
+      const statusTicker = { ms: REFRESH_MS, run: loadStatus, timer: null, enabled: true, panel: '' };
       tickers.push(statusTicker);
       async function loadStatus() {
         try {
@@ -1417,6 +1457,7 @@ band, section tabs, panels, dense record tables, and status tags.
         statusTicker.enabled = statusAuto.checked;
         restartTicker(statusTicker);
       });
+      restartTicker(statusTicker);
       loadStatus();
     }
 
@@ -1434,8 +1475,12 @@ band, section tabs, panels, dense record tables, and status tags.
       const prev = config.pager ? document.getElementById(config.pager.prev) : null;
       const next = config.pager ? document.getElementById(config.pager.next) : null;
       const table = { limit: config.limit || 10, offset: 0, selectedId: 0, lastKey: '', paused: false };
-      const ticker = { ms: REFRESH_MS, run: load, timer: null, enabled: auto ? auto.checked : false };
-      if (auto) tickers.push(ticker);
+      /* A table only refreshes while its own section is on screen. The owner is
+         derived from the markup so a new table cannot forget to declare it. */
+      const owner = body.closest('[data-panel]');
+      const panelId = owner ? owner.dataset.panel : '';
+      const ticker = { ms: REFRESH_MS, run: load, timer: null, enabled: auto ? auto.checked : false, panel: panelId };
+      tickers.push(ticker);
       /* Marks the tbody as progressively enhanced, so a confirmed row action
          can refresh this table in place instead of reloading the page. */
       body.setAttribute('data-managed', 'true');
@@ -1847,17 +1892,25 @@ band, section tabs, panels, dense record tables, and status tags.
         return parts.join(' · ');
       }
 
-      async function loadMagnets() {
-        let result;
-        try {
-          result = await fetchJSON('/api/admin/import-references/list');
-        } catch (err) {
-          return;
-        }
-        if (!result.ok || !result.data) return;
-        const items = result.data.items || [];
-        magnetList.innerHTML = items.length
-          ? items.map(function(item) {
+      /* The full set is kept so a filter can re-render instantly, while the
+         workflow stepper always reflects every transfer, filtered or not. */
+      let magnetItems = [];
+      const magnetFilter = document.getElementById('magnet-q');
+      const magnetAuto = document.getElementById('magnet-auto');
+
+      function magnetQuery() {
+        return magnetFilter && magnetFilter.value ? magnetFilter.value.trim().toLowerCase() : '';
+      }
+
+      function magnetMatches(item, q) {
+        if (!q) return true;
+        return [item.kind, item.name, item.infoHash, item.reference, item.downloadDir, item.recoveredPath, item.downloadStatus, item.recoveryStatus, item.downloadError, item.recoveryError]
+          .some(function(value) { return value && String(value).toLowerCase().indexOf(q) >= 0; });
+      }
+
+      function renderMagnets(visible) {
+        magnetList.innerHTML = visible.length
+          ? visible.map(function(item) {
               const name = item.name || item.infoHash || item.reference;
               const destination = [item.downloadDir, item.recoveredPath ? 'loaded ' + item.recoveredPath : ''].filter(Boolean).join(' · ');
               return '<tr>' +
@@ -1870,7 +1923,23 @@ band, section tabs, panels, dense record tables, and status tags.
                 '<td><span class="tag ' + (TONES[itemTone(item)] || '') + '">' + escapeHtml(itemLabel(item)) + '</span></td>' +
                 '</tr>';
             }).join('')
-          : '<tr class="row-empty"><td colspan="5">No magnets downloaded yet.</td></tr>';
+          : '<tr class="row-empty"><td colspan="5">' +
+            (magnetItems.length ? 'No transfers match this filter.' : 'No magnets downloaded yet.') + '</td></tr>';
+      }
+
+      async function loadMagnets() {
+        let result;
+        try {
+          result = await fetchJSON('/api/admin/import-references/list');
+        } catch (err) {
+          return;
+        }
+        if (!result.ok || !result.data) return;
+        const items = result.data.items || [];
+        const same = JSON.stringify(items) === JSON.stringify(magnetItems);
+        magnetItems = items;
+        const q = magnetQuery();
+        renderMagnets(items.filter(function(item) { return magnetMatches(item, q); }));
 
         const failed = items.some(function(item) { return itemTone(item) === 'error'; });
         const recovering = items.some(function(item) { return BUSY.indexOf(item.recoveryStatus) >= 0; });
@@ -1887,7 +1956,12 @@ band, section tabs, panels, dense record tables, and status tags.
           setStep('validate', 'Needs attention', 'error');
           setStep('load', 'Blocked', 'error');
         }
-        if (magnetMeta) magnetMeta.textContent = items.length + ' reference' + (items.length === 1 ? '' : 's') + ' · updated ' + new Date().toLocaleTimeString();
+        if (magnetMeta) {
+          const shown = items.filter(function(item) { return magnetMatches(item, q); }).length;
+          magnetMeta.textContent = q
+            ? shown + ' of ' + items.length + ' transfer' + (items.length === 1 ? '' : 's') + ' · updated ' + new Date().toLocaleTimeString()
+            : items.length + ' reference' + (items.length === 1 ? '' : 's') + (same ? '' : ' · updated ' + new Date().toLocaleTimeString());
+        }
         if (magnetClientTag) magnetClientTag.textContent = failed ? 'transfer attention' : (recovering || active ? 'transfer running' : 'aria2c dispatch');
       }
 
@@ -1919,8 +1993,24 @@ band, section tabs, panels, dense record tables, and status tags.
         }
       });
 
+      if (magnetFilter) {
+        let pending = null;
+        magnetFilter.addEventListener('input', function() {
+          if (pending) clearTimeout(pending);
+          pending = setTimeout(function() { loadMagnets(); }, 200);
+        });
+      }
+
+      const magnetTicker = every(10000, loadMagnets, 'recovery-workflow');
+      if (magnetAuto) {
+        magnetTicker.enabled = magnetAuto.checked;
+        restartTicker(magnetTicker);
+        magnetAuto.addEventListener('change', function() {
+          magnetTicker.enabled = magnetAuto.checked;
+          restartTicker(magnetTicker);
+        });
+      }
       loadMagnets();
-      every(10000, loadMagnets);
     }
 
     /* -------------------------------------------------- catalog load form */
