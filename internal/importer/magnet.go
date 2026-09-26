@@ -24,7 +24,7 @@ func ParseExternalReference(raw string) (ExternalReference, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return ExternalReference{}, fmt.Errorf("invalid reference: %w", err)
+		return ExternalReference{}, fmt.Errorf("invalid magnet or torrent URL: %w", err)
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "magnet":
@@ -35,7 +35,7 @@ func ParseExternalReference(raw string) (ExternalReference, error) {
 		}
 		return ExternalReference{Kind: "torrent-url", Reference: raw}, nil
 	default:
-		return ExternalReference{}, fmt.Errorf("reference must be a magnet: or https:// .torrent URL")
+		return ExternalReference{}, fmt.Errorf("input must be a magnet link or an https:// .torrent URL")
 	}
 }
 
@@ -52,7 +52,17 @@ func normalizeExternalReference(raw string) string {
 		}
 		raw = html.UnescapeString(strings.TrimSpace(decoded))
 	}
-	return raw
+	raw = strings.Trim(raw, "\"'`<>")
+	if index := strings.Index(strings.ToLower(raw), "magnet:"); index > 0 {
+		raw = raw[index:]
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "?xt=urn:btih:") {
+		raw = "magnet:" + raw
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "xt=urn:btih:") {
+		raw = "magnet:?" + raw
+	}
+	return strings.Trim(raw, "\"'`<>")
 }
 
 func parseMagnet(raw string, parsed *url.URL) (ExternalReference, error) {
