@@ -121,6 +121,25 @@ func TestCatalogQueries(t *testing.T) {
 	if total != 2 || len(results) != 0 {
 		t.Fatalf("expected invalid page bounds to return no rows safely, total=%d results=%#v", total, results)
 	}
+	if _, err := db.Exec(`insert into categories(id, name) values (2, 'Audio')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into torrents(id, category, status, name, numFiles, size, seeders, leechers, username, added, description, infoHash) values (12, 2, 'ok', 'Category Torrent', 1, 4096, 2, 3, 'carol', 1710000200, 'category sort', '012345')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, sortField := range []string{"name", "category", "size", "seeders", "leechers", "added"} {
+		results, _, err = cat.SearchPage("", "", sortField, "asc", 10, 0)
+		if err != nil {
+			t.Fatalf("sort %q failed: %v", sortField, err)
+		}
+		if len(results) != 3 {
+			t.Fatalf("sort %q returned %d rows, want 3", sortField, len(results))
+		}
+	}
+	results, _, err = cat.SearchPage("", "", "category", "asc", 10, 0)
+	if err != nil || len(results) != 3 || results[0].CategoryName != "Audio" {
+		t.Fatalf("category sort must follow displayed category names: results=%#v err=%v", results, err)
+	}
 
 	indexPath := filepath.Join(t.TempDir(), "search-index.sqlite")
 	if err := BuildSearchIndex(path, indexPath); err != nil {

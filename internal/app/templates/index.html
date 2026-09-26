@@ -3,10 +3,15 @@
     {{template "topbar" (dict "Eyebrow" "SQLite catalog browser" "Chips" (list "Read-only catalog" "Go backend" "Separate app state") "ActionHref" "/admin" "ActionLabel" "Admin")}}
     <div class="card search">
       <input id="q" aria-label="Search catalog" placeholder="Search titles, descriptions, hashes..." onkeydown="handleSearchKey(event)" />
-      <select id="sort" aria-label="Sort order" onchange="currentSort = this.value; if (this.value === 'hot' || this.value === 'newest' || this.value === 'seeders') currentDir = 'desc'; search(0)">
+      <select id="sort" aria-label="Sort order" onchange="selectSort(this.value)">
         <option value="hot">Curated</option>
         <option value="newest">Newest</option>
+        <option value="name">Name</option>
+        <option value="category">Category</option>
+        <option value="size">Size</option>
         <option value="seeders">Seeders</option>
+        <option value="leechers">Leechers</option>
+        <option value="added">Added</option>
       </select>
       <select id="limit" aria-label="Results per page">
         <option value="50">50 / page</option>
@@ -50,12 +55,12 @@
       <table class="dense-table compact">
         <thead>
           <tr>
-            <th><button type="button" class="header-sort" data-sort-field="name" onclick="sortBy('name', 'Name')">Name</button></th>
-            <th><button type="button" class="header-sort" data-sort-field="category" onclick="sortBy('category', 'Category')">Category</button></th>
-            <th><button type="button" class="header-sort" data-sort-field="size" onclick="sortBy('size', 'Size')">Size</button></th>
-            <th><button type="button" class="header-sort" data-sort-field="seeders" onclick="sortBy('seeders', 'Seeders')">Seeders</button></th>
-            <th><button type="button" class="header-sort" data-sort-field="leechers" onclick="sortBy('leechers', 'Leechers')">Leechers</button></th>
-            <th><button type="button" class="header-sort" data-sort-field="added" onclick="sortBy('added', 'Added')">Added</button></th>
+            <th scope="col" data-sort-column="name"><button type="button" class="header-sort" data-sort-field="name" onclick="sortBy('name', 'Name')">Name</button></th>
+            <th scope="col" data-sort-column="category"><button type="button" class="header-sort" data-sort-field="category" onclick="sortBy('category', 'Category')">Category</button></th>
+            <th scope="col" data-sort-column="size"><button type="button" class="header-sort" data-sort-field="size" onclick="sortBy('size', 'Size')">Size</button></th>
+            <th scope="col" data-sort-column="seeders"><button type="button" class="header-sort" data-sort-field="seeders" onclick="sortBy('seeders', 'Seeders')">Seeders</button></th>
+            <th scope="col" data-sort-column="leechers"><button type="button" class="header-sort" data-sort-field="leechers" onclick="sortBy('leechers', 'Leechers')">Leechers</button></th>
+            <th scope="col" data-sort-column="added"><button type="button" class="header-sort" data-sort-field="added" onclick="sortBy('added', 'Added')">Added</button></th>
             <th></th>
           </tr>
         </thead>
@@ -167,6 +172,11 @@
         search(0);
       }
     }
+    function selectSort(field) {
+      currentSort = field;
+      currentDir = field === 'name' || field === 'category' ? 'asc' : 'desc';
+      search(0);
+    }
     function nextPage() { if (currentOffset + currentLimit < currentTotal) search(currentOffset + currentLimit); }
     function prevPage() { search(Math.max(0, currentOffset - currentLimit)); }
     function sortBy(field, label) {
@@ -184,7 +194,11 @@
       document.querySelectorAll('[data-sort-field]').forEach(el => {
         const active = el.dataset.sortField === currentSort;
         el.classList.toggle('active', active);
-        el.setAttribute('aria-sort', active ? (currentDir === 'desc' ? 'descending' : 'ascending') : 'none');
+        const direction = currentDir === 'desc' ? 'descending' : 'ascending';
+        el.dataset.sortDirection = active ? currentDir : '';
+        el.setAttribute('aria-label', 'Sort by ' + el.textContent.trim() + (active ? ' ' + direction : ''));
+        const column = el.closest('[data-sort-column]');
+        if (column) column.setAttribute('aria-sort', active ? direction : 'none');
       });
     }
     function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }

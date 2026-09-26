@@ -251,28 +251,28 @@ func searchQuery(q, category, sortField, sortDir string) (string, []string, []an
 }
 
 func searchQueryFor(q, category, sortField, sortDir string, useSearchIndex bool) (string, []string, []any) {
-	orderBy := "seeders desc, added desc"
+	orderBy := "t.seeders desc, t.added desc"
 	dir := "asc"
 	if strings.EqualFold(sortDir, "desc") {
 		dir = "desc"
 	}
 	switch sortField {
 	case "name":
-		orderBy = "name " + dir + ", seeders desc, added desc"
+		orderBy = "t.name " + dir + ", t.seeders desc, t.added desc"
 	case "category":
-		orderBy = "category " + dir + ", name asc"
+		orderBy = "coalesce(c.name, '') " + dir + ", t.name asc"
 	case "size":
-		orderBy = "size " + dir + ", seeders desc"
+		orderBy = "t.size " + dir + ", t.seeders desc"
 	case "seeders":
-		orderBy = "seeders " + dir + ", leechers asc, added desc"
+		orderBy = "t.seeders " + dir + ", t.leechers asc, t.added desc"
 	case "leechers":
-		orderBy = "leechers " + dir + ", seeders desc, added desc"
+		orderBy = "t.leechers " + dir + ", t.seeders desc, t.added desc"
 	case "newest":
-		orderBy = "added desc, seeders desc"
+		orderBy = "t.added desc, t.seeders desc"
 	case "added":
-		orderBy = "added " + dir + ", seeders desc"
+		orderBy = "t.added " + dir + ", t.seeders desc"
 	case "", "hot":
-		orderBy = "seeders desc, added desc"
+		orderBy = "t.seeders desc, t.added desc"
 	}
 
 	where := []string{`(? = '' or t.category = ?)`}

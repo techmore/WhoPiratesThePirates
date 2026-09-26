@@ -281,6 +281,8 @@
       text-shadow: 0 0 0.01px currentColor;
     }
     .header-sort.active::after { opacity: 1; color: var(--olive-700); }
+    .header-sort[data-sort-direction="asc"]::after { content:'↑'; }
+    .header-sort[data-sort-direction="desc"]::after { content:'↓'; }
     .header-sort::after { content: '↕'; font-size: 9px; line-height: 1; opacity: .55; }
     .inline-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
     .inline-actions .button-secondary, .inline-actions button { width:auto; }
