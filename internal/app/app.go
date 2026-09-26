@@ -1388,12 +1388,22 @@ func (a *App) startReferenceDownload(item state.ImportReference) downloadStatus 
 	id := item.ID
 	reference := item.Reference
 	aria2Path := a.aria2Path
+	downloadDir := filepath.Join(a.downloadDir, fmt.Sprintf("reference-%d", id))
+	if artifact, err := a.findReferenceArtifact(item.Name, downloadDir); err != nil {
+		status := downloadStatus{Status: "not_started", Directory: downloadDir, Error: fmt.Sprintf("find existing download: %v", err)}
+		a.setDownloadStatus(id, status)
+		return status
+	} else if artifact != "" && completedArtifact(artifact) {
+		status := downloadStatus{Status: "reused", Started: true, Directory: downloadDir, RecoveryStatus: "recovering"}
+		a.setDownloadStatus(id, status)
+		go a.recoverReference(id, reference, item.Name, downloadDir)
+		return status
+	}
 	if aria2Path == "" {
 		status := downloadStatus{Status: "client_unavailable", Error: "aria2c is not installed or not configured; install aria2c or set APP_ARIA2_PATH"}
 		a.setDownloadStatus(id, status)
 		return status
 	}
-	downloadDir := filepath.Join(a.downloadDir, fmt.Sprintf("reference-%d", id))
 	if err := os.MkdirAll(downloadDir, 0o700); err != nil {
 		status := downloadStatus{Status: "not_started", Directory: downloadDir, Error: fmt.Sprintf("create download directory: %v", err)}
 		a.setDownloadStatus(id, status)
@@ -1441,6 +1451,18 @@ func (a *App) startReferenceDownload(item state.ImportReference) downloadStatus 
 		}
 	}()
 	return status
+}
+
+func completedArtifact(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	if _, err := os.Stat(path + ".aria2"); err == nil {
+		return false
+	} else if !os.IsNotExist(err) {
+		return false
+	}
+	return true
 }
 
 func (a *App) setDownloadStatus(id int64, status downloadStatus) {

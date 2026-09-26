@@ -1192,7 +1192,9 @@
               let data = {};
               try { data = JSON.parse(text); } catch (error) {}
               magnetForm.reset();
-              if (data.download && data.download.started) {
+              if (data.download && data.download.status === 'reused') {
+                magnetStatus.textContent = 'Existing completed download found. Recovery and catalog loading started.';
+              } else if (data.download && data.download.started) {
                 magnetStatus.textContent = 'Download started. Files are being saved to ' + data.download.directory + '.';
               } else if (data.download && data.download.error) {
                 magnetStatus.textContent = 'Magnet saved, but download did not start: ' + data.download.error;
