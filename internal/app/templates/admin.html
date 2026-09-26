@@ -1293,10 +1293,10 @@ band, section tabs, panels, dense record tables, and status tags.
       try {
         const result = await fetchJSON(action, { method: 'POST', body: new FormData(form, trigger) });
         if (!result.ok) {
-          const detail = result.status === 409 || result.status === 400
-            ? 'The record could not be changed. It may still be referenced.'
-            : serverMessage(result, 'The server rejected the request.');
-          toast(label + ' failed', 'error', detail);
+          /* Surface the server's own reason. A generic "it may still be
+             referenced" guess is wrong for most failures and hides the real
+             cause, which is exactly what an operator needs here. */
+          toast(label + ' failed', 'error', serverMessage(result, 'The server rejected the request (status ' + result.status + ').'));
           return false;
         }
         toast(label, 'ok');
@@ -1448,18 +1448,26 @@ band, section tabs, panels, dense record tables, and status tags.
         return body.contains(document.activeElement) || body.querySelector('.row-detail') !== null;
       }
 
+      /* The hold indicator gets its own element next to the Auto control.
+         It deliberately does not live inside the pager meta line, because that
+         line is rewritten wholesale on every refresh. */
+      const pauseNote = (function() {
+        if (!auto) return null;
+        const host = auto.closest('.switch') || auto.parentNode;
+        if (!host) return null;
+        const note = document.createElement('span');
+        note.className = 'ticker-paused';
+        note.hidden = true;
+        note.textContent = 'held while you edit';
+        host.appendChild(note);
+        return note;
+      })();
+
       function setPaused(paused) {
         if (table.paused === paused) return;
         table.paused = paused;
-        if (auto) {
-          auto.disabled = paused;
-          if (meta && !meta.querySelector('.ticker-paused')) {
-            const note = document.createElement('span');
-            note.className = 'ticker-paused';
-            note.textContent = 'auto-refresh held while you edit';
-            meta.appendChild(note);
-          }
-        }
+        if (auto) auto.disabled = paused;
+        if (pauseNote) pauseNote.hidden = !paused;
       }
 
       body.addEventListener('focusin', function() { setPaused(true); });
@@ -1481,6 +1489,7 @@ band, section tabs, panels, dense record tables, and status tags.
           ? items.map(config.renderRow).join('')
           : '<tr class="row-empty"><td colspan="' + (config.columns || 1) + '">' + escapeHtml(config.empty || 'No rows for this page.') + '</td></tr>';
         body.querySelectorAll('[data-select-id]').forEach(function(button) {
+          if (button.getAttribute('aria-expanded') === null) button.setAttribute('aria-expanded', 'false');
           button.addEventListener('click', function() {
             const id = Number(button.getAttribute('data-select-id'));
             toggleDetail(id, button.closest('tr'));
@@ -1541,15 +1550,21 @@ band, section tabs, panels, dense record tables, and status tags.
           return;
         }
         row.setAttribute('aria-selected', 'true');
+        row.querySelectorAll('[data-select-id]').forEach(function(button) { button.setAttribute('aria-expanded', 'true'); });
         showDetail(row, table.selectedId);
       }
 
       async function load(options) {
         const force = Boolean(options && options.force);
-        if (!force && busy()) {
+        /* Reconcile the hold on every attempt rather than trusting focus events
+           alone: some environments never dispatch them, and a table stuck in
+           "held" state would silently stop refreshing. */
+        const held = busy();
+        if (!force && held) {
           setPaused(true);
           return;
         }
+        setPaused(held);
         const params = 'limit=' + table.limit + '&offset=' + table.offset + '&q=' + encodeURIComponent(query());
         try {
           const result = await fetchJSON(config.list + '?' + params);
