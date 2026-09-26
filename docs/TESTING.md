@@ -29,7 +29,7 @@ test should be a separate manual, opt-in test because it depends on peers,
 network conditions, and content availability.
 
 The admin status panel reports whether an external `aria2c` binary is available.
-The admin download-reference flow invokes it only after an operator submits an
+The admin **Download Magnet** flow invokes it only after an operator submits an
 authorized magnet or `.torrent` URL.
 
 ## First-run commands

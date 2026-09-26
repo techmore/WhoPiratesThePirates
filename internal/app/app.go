@@ -1275,7 +1275,7 @@ func (a *App) handleAdminImportReferences(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	parsed, err := importer.ParseExternalReference(r.FormValue("reference"))
+	parsed, err := importer.ParseExternalReference(externalDownloadInput(r))
 	if err != nil {
 		_ = a.state.Audit("import_reference_rejected", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1290,6 +1290,15 @@ func (a *App) handleAdminImportReferences(w http.ResponseWriter, r *http.Request
 	a.applyDownloadStatus(&item, status)
 	_ = a.state.Audit("import_reference_recorded", fmt.Sprintf("kind=%s info_hash=%s download=%s", item.Kind, item.InfoHash, status.Status))
 	writeJSON(w, map[string]any{"reference": item, "download": status})
+}
+
+func externalDownloadInput(r *http.Request) string {
+	for _, field := range []string{"magnet", "reference", "url", "uri"} {
+		if value := strings.TrimSpace(r.FormValue(field)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (a *App) handleAdminImportReferencesList(w http.ResponseWriter, r *http.Request) {

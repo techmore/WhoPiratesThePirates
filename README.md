@@ -170,16 +170,18 @@ registers the magnet, and can load that copy immediately. Enabled magnets
 appear in the **Authorized catalog backups** dropdown on the browse page so
 customers can copy or open the link in an approved recovery client.
 
-The server does not fetch magnet content or invoke a torrent client. After an
-authorized client has produced a local SQLite backup, an admin can select its
-configured source—or enter the local path directly—and choose **Validate and
-Load Catalog**. When a local path is provided while adding a recovery source,
-the checked **Validate and load immediately** option performs that validation
-and live load automatically. The running search UI detects the catalog change,
-refreshes its counts/categories/results, and remembers the selection across
-service restarts while the recovered file remains valid; the source database
-is never modified. Uploading the database does not create or seed the matching
-torrent; an approved torrent client must already seed the magnet customers use.
+The customer-facing browse page only exposes and copies approved magnets. The
+admin **Download Magnet** action invokes `aria2c` and writes the download to the
+configured download directory. After an authorized client has produced a local
+SQLite backup, an admin can select its configured source—or enter the local
+path directly—and choose **Validate and Load Catalog**. When a local path is
+provided while adding a recovery source, the checked **Validate and load
+immediately** option performs that validation and live load automatically. The
+running search UI detects the catalog change, refreshes its
+counts/categories/results, and remembers the selection across service restarts
+while the recovered file remains valid; the source database is never modified.
+Uploading the database does not create or seed the matching torrent; an
+approved torrent client must seed the magnet customers use.
 
 ## Environment
 
@@ -243,9 +245,9 @@ network.
 - `/api/admin/catalog-sources/upload` — upload, validate, register, and optionally load a SQLite recovery catalog
 - `/api/admin/catalog-sources/load` — validate and live-load a local catalog backup
 
-### External reference import
+### Magnet download
 
-The admin UI includes a **Download External Reference** action with a Heroicon.
+The admin UI includes a **Download Magnet** action with a Heroicon.
 It accepts:
 
 - `magnet:?xt=urn:btih:...` references with a valid v1 info hash

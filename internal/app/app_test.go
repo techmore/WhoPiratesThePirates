@@ -2279,7 +2279,7 @@ func TestAdminImportReferenceStartsConfiguredDownloadClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	magnet := "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
-	form := url.Values{"reference": []string{magnet}}
+	form := url.Values{"magnet": []string{magnet}}
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-references", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})

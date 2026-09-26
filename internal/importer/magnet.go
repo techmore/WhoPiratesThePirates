@@ -19,7 +19,7 @@ type ExternalReference struct {
 func ParseExternalReference(raw string) (ExternalReference, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return ExternalReference{}, fmt.Errorf("reference is required")
+		return ExternalReference{}, fmt.Errorf("magnet or .torrent URL is required")
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {

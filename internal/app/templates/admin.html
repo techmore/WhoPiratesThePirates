@@ -30,19 +30,19 @@
         <div id="status-health" class="side-list" style="margin-top:10px;"></div>
       </div>
     </div>
-    <div class="card" id="import-references">
-      {{template "sectiontitle" "Download External Reference"}}
+    <div class="card" id="magnet-download">
+      {{template "sectiontitle" "Download Magnet"}}
       <p class="muted">Paste an operator-authorized magnet or .torrent URL to start aria2c immediately. Downloads are written to the configured download directory and tracked here.</p>
-      <form id="import-reference-form" action="/api/admin/import-references" method="post" class="form-section">
-        <label for="import-reference">Magnet URI or authorized .torrent URL</label>
-        <input id="import-reference" name="reference" required placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent">
+      <form id="magnet-download-form" action="/api/admin/import-references" method="post" class="form-section">
+        <label for="magnet-download-input">Magnet URI or authorized .torrent URL</label>
+        <input id="magnet-download-input" name="magnet" required placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent">
         <button type="submit">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-          Start Download
+          Download
         </button>
-        <div id="import-reference-status" class="muted"></div>
+        <div id="magnet-download-status" class="muted"></div>
       </form>
-      <div id="import-reference-list" class="side-list" style="margin-top:12px;"></div>
+      <div id="magnet-download-list" class="side-list" style="margin-top:12px;"></div>
     </div>
     <div class="card" id="catalog-source-admin">
       {{template "sectiontitle" "Catalog Recovery Sources"}}
@@ -1016,47 +1016,47 @@
               }
             });
           }
-          const referenceForm = document.getElementById('import-reference-form');
-          const referenceStatus = document.getElementById('import-reference-status');
-          const referenceList = document.getElementById('import-reference-list');
-          if (referenceForm && referenceStatus && referenceList) {
-            const escapeReference = function(value) {
+          const magnetForm = document.getElementById('magnet-download-form');
+          const magnetStatus = document.getElementById('magnet-download-status');
+          const magnetList = document.getElementById('magnet-download-list');
+          if (magnetForm && magnetStatus && magnetList) {
+            const escapeMagnet = function(value) {
               return String(value).replace(/[&<>"]/g, function(c) {
                 return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
               });
             };
-            const loadReferences = async function() {
+            const loadMagnets = async function() {
               const response = await fetch('/api/admin/import-references/list');
               if (!response.ok) return;
               const data = await response.json();
-              referenceList.innerHTML = (data.items || []).map(function(item) {
+              magnetList.innerHTML = (data.items || []).map(function(item) {
                 const status = item.downloadStatus ? 'Download: ' + item.downloadStatus : 'Not started';
                 const detail = item.downloadError ? ' · ' + item.downloadError : '';
-                return '<div class="kv"><div><strong>' + escapeReference(item.kind) + '</strong><div class="muted">' + escapeReference(item.name || item.infoHash || item.reference) + '</div><div class="muted">' + escapeReference(item.reference) + '</div></div><span class="muted">' + escapeReference(status + detail) + '</span></div>';
-              }).join('') || '<div class="kv"><span>External references</span><span class="muted">No references recorded.</span></div>';
+                return '<div class="kv"><div><strong>' + escapeMagnet(item.kind) + '</strong><div class="muted">' + escapeMagnet(item.name || item.infoHash || item.reference) + '</div><div class="muted">' + escapeMagnet(item.reference) + '</div></div><span class="muted">' + escapeMagnet(status + detail) + '</span></div>';
+              }).join('') || '<div class="kv"><span>Downloads</span><span class="muted">No magnets downloaded yet.</span></div>';
             };
-            referenceForm.addEventListener('submit', async function(event) {
+            magnetForm.addEventListener('submit', async function(event) {
               event.preventDefault();
-              referenceStatus.textContent = 'Starting download...';
-              const response = await fetch(referenceForm.action, { method: 'POST', body: new FormData(referenceForm) });
+              magnetStatus.textContent = 'Starting download...';
+              const response = await fetch(magnetForm.action, { method: 'POST', body: new FormData(magnetForm) });
               const text = await response.text();
               if (!response.ok) {
-                referenceStatus.textContent = text;
+                magnetStatus.textContent = text;
                 return;
               }
               let data = {};
               try { data = JSON.parse(text); } catch (error) {}
-              referenceForm.reset();
+              magnetForm.reset();
               if (data.download && data.download.started) {
-                referenceStatus.textContent = 'Download started. Files are being saved to ' + data.download.directory + '.';
+                magnetStatus.textContent = 'Download started. Files are being saved to ' + data.download.directory + '.';
               } else if (data.download && data.download.error) {
-                referenceStatus.textContent = 'Reference saved, but download did not start: ' + data.download.error;
+                magnetStatus.textContent = 'Magnet saved, but download did not start: ' + data.download.error;
               } else {
-                referenceStatus.textContent = 'Reference saved.';
+                magnetStatus.textContent = 'Magnet saved.';
               }
-              loadReferences();
+              loadMagnets();
             });
-            loadReferences();
+            loadMagnets();
           }
         })();
       </script>
