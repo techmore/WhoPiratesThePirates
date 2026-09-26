@@ -2261,6 +2261,36 @@ func TestAdminImportReferenceRecordsMagnetMetadataOnly(t *testing.T) {
 	}
 }
 
+func TestAdminImportReferenceAcceptsBrowserMultipartForm(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	magnet := "magnet:?xt=urn:btih:0D4CD209E72F28023692DFCA65345AA508F9BF7A&dn=The%20Pirate%20Bay%20%26amp%3B%20YTS%20-%20Full%20Database%20Backup%20-%202024-06"
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("magnet", magnet); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-references", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("multipart magnet was rejected: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "0D4CD209E72F28023692DFCA65345AA508F9BF7A") {
+		t.Fatalf("expected parsed multipart magnet metadata, got %s", rec.Body.String())
+	}
+}
+
 func TestAdminImportReferenceStartsConfiguredDownloadClient(t *testing.T) {
 	a, _ := newAdminTestApp(t, testAdminPassword)
 	defer a.Close()

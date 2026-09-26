@@ -1271,7 +1271,13 @@ func (a *App) handleAdminImportReferences(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	var err error
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		err = r.ParseMultipartForm(maxRequestBodyBytes)
+	} else {
+		err = r.ParseForm()
+	}
+	if err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
