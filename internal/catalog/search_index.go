@@ -3,12 +3,53 @@ package catalog
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"who-pirates-the-pirates/internal/sqliteuri"
 )
+
+const searchIndexFormatVersion = "2"
+
+type sourceFingerprint struct {
+	path     string
+	size     int64
+	modified int64
+}
+
+func fingerprintSource(path string) (sourceFingerprint, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return sourceFingerprint{}, err
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return sourceFingerprint{}, err
+	}
+	return sourceFingerprint{path: filepath.Clean(absolute), size: info.Size(), modified: info.ModTime().UnixNano()}, nil
+}
+
+// SearchIndexMatches reports whether the persisted FTS index was built from
+// the current version of the read-only source catalog.
+func SearchIndexMatches(sourcePath, indexPath string) (bool, error) {
+	source, err := fingerprintSource(sourcePath)
+	if err != nil {
+		return false, err
+	}
+	index, err := openReadOnlyDatabase(indexPath, "")
+	if err != nil {
+		return false, nil
+	}
+	defer index.Close()
+
+	var format, indexedPath string
+	var size, modified int64
+	err = index.QueryRow(`select format_version, source_path, source_size, source_modified_ns from search_index_metadata where id = 1`).Scan(&format, &indexedPath, &size, &modified)
+	if err != nil {
+		return false, nil
+	}
+	return format == searchIndexFormatVersion && indexedPath == source.path && size == source.size && modified == source.modified, nil
+}
 
 // BuildSearchIndex creates an application-owned FTS5 index for a read-only
 // catalog. The source database is never modified; only searchable text and
@@ -17,7 +58,11 @@ func BuildSearchIndex(sourcePath, indexPath string) error {
 	if strings.TrimSpace(sourcePath) == "" || strings.TrimSpace(indexPath) == "" {
 		return fmt.Errorf("source and index paths are required")
 	}
-	source, err := sql.Open("sqlite", readOnlyURI(sourcePath))
+	fingerprint, err := fingerprintSource(sourcePath)
+	if err != nil {
+		return fmt.Errorf("inspect source catalog: %w", err)
+	}
+	source, err := openReadOnlyDatabase(sourcePath, "")
 	if err != nil {
 		return err
 	}
@@ -33,10 +78,12 @@ func BuildSearchIndex(sourcePath, indexPath string) error {
 	if err := os.Remove(temporaryPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale search index: %w", err)
 	}
-	index, err := sql.Open("sqlite", sqliteuri.Build(temporaryPath, "_pragma=busy_timeout(5000)"))
+	index, err := sql.Open("sqlite", sqliteFileURI(temporaryPath, url.Values{"_pragma": {"busy_timeout(5000)"}}))
 	if err != nil {
 		return err
 	}
+	index.SetMaxOpenConns(1)
+	index.SetMaxIdleConns(1)
 	removeTemporary := true
 	defer func() {
 		_ = index.Close()
@@ -44,7 +91,7 @@ func BuildSearchIndex(sourcePath, indexPath string) error {
 			_ = os.Remove(temporaryPath)
 		}
 	}()
-	if _, err := index.Exec(`pragma journal_mode = off; pragma synchronous = off; pragma temp_store = memory; create virtual table torrent_search using fts5(content);`); err != nil {
+	if _, err := index.Exec(`pragma journal_mode = off; pragma synchronous = off; pragma temp_store = memory; create virtual table torrent_search using fts5(content); create table search_index_metadata (id integer primary key check (id = 1), format_version text not null, source_path text not null, source_size integer not null, source_modified_ns integer not null);`); err != nil {
 		return fmt.Errorf("create FTS5 search index: %w", err)
 	}
 
@@ -111,6 +158,9 @@ func BuildSearchIndex(sourcePath, indexPath string) error {
 	}
 	if err := commitBatch(); err != nil {
 		return fmt.Errorf("commit final search index batch: %w", err)
+	}
+	if _, err := index.Exec(`insert into search_index_metadata (id, format_version, source_path, source_size, source_modified_ns) values (1, ?, ?, ?, ?)`, searchIndexFormatVersion, fingerprint.path, fingerprint.size, fingerprint.modified); err != nil {
+		return fmt.Errorf("write search index metadata: %w", err)
 	}
 	if err := index.Close(); err != nil {
 		return fmt.Errorf("close search index: %w", err)

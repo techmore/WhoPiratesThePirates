@@ -1,24 +1,63 @@
 package catalog
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+
 	"who-pirates-the-pirates/internal/sqliteuri"
 )
-
-// readOnlyURI opens a catalog file strictly read-only with a bounded busy wait.
-func readOnlyURI(path string) string {
-	return sqliteuri.Build(path, "mode=ro", "_pragma=busy_timeout(5000)")
-}
 
 type Catalog struct {
 	db            *sql.DB
 	searchIndexed bool
+	metadataMu    sync.Mutex
+	stats         Stats
+	statsCached   bool
+	categories    []Category
+	categoriesSet bool
+	searchPages   *searchPageCache
+}
+
+const (
+	maxCatalogConnections = 4
+	searchIndexParameter  = "_whop2p_search_index"
+)
+
+func init() {
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		queryStart := strings.IndexByte(dsn, '?')
+		if queryStart < 0 {
+			return nil
+		}
+		params, err := url.ParseQuery(dsn[queryStart+1:])
+		if err != nil {
+			return err
+		}
+		indexPath := params.Get(searchIndexParameter)
+		if indexPath == "" {
+			return nil
+		}
+
+		indexURI := sqliteFileURI(indexPath, url.Values{"mode": {"ro"}})
+		_, err = conn.ExecContext(context.Background(), `attach database ? as search_index`, []driver.NamedValue{{Ordinal: 1, Value: indexURI}})
+		if err != nil {
+			return fmt.Errorf("attach search index: %w", err)
+		}
+		if _, err := conn.ExecContext(context.Background(), `pragma search_index.cache_size = -4096`, nil); err != nil {
+			return fmt.Errorf("configure search index cache: %w", err)
+		}
+		return nil
+	})
 }
 
 type Category struct {
@@ -60,32 +99,55 @@ type Stats struct {
 }
 
 func Open(path string) (*Catalog, error) {
-	db, err := sql.Open("sqlite", readOnlyURI(path))
+	db, err := openReadOnlyDatabase(path, "")
 	if err != nil {
 		return nil, err
 	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return &Catalog{db: db}, nil
+	return &Catalog{db: db, searchPages: newSearchPageCache()}, nil
 }
 
 func OpenWithSearchIndex(path, indexPath string) (*Catalog, error) {
-	catalog, err := Open(path)
+	db, err := openReadOnlyDatabase(path, indexPath)
 	if err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(indexPath) == "" {
-		return catalog, nil
+		return &Catalog{db: db, searchPages: newSearchPageCache()}, nil
 	}
-	indexURI := readOnlyURI(indexPath)
-	if _, err := catalog.db.Exec(`attach database ? as search_index`, indexURI); err != nil {
-		_ = catalog.Close()
-		return nil, fmt.Errorf("attach search index: %w", err)
+	return &Catalog{db: db, searchIndexed: true, searchPages: newSearchPageCache()}, nil
+}
+
+func openReadOnlyDatabase(path, searchIndexPath string) (*sql.DB, error) {
+	query := url.Values{
+		"mode":    {"ro"},
+		"_pragma": {"busy_timeout(5000)", "cache_size(-8192)"},
 	}
-	catalog.searchIndexed = true
-	return catalog, nil
+	if strings.TrimSpace(searchIndexPath) != "" {
+		query.Set(searchIndexParameter, searchIndexPath)
+	}
+	db, err := sql.Open("sqlite", sqliteFileURI(path, query))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(maxCatalogConnections)
+	db.SetMaxIdleConns(maxCatalogConnections)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// sqliteFileURI builds a SQLite file URI through the shared sqliteuri helper so
+// paths containing '?', '#' or '%' open the intended file.
+func sqliteFileURI(path string, query url.Values) string {
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	if len(query) == 0 {
+		return sqliteuri.Build(path)
+	}
+	return sqliteuri.Build(path, query.Encode())
 }
 
 // Validate checks that path is an intact, non-empty catalog that exposes the
@@ -100,7 +162,7 @@ func Validate(path string) error {
 		return fmt.Errorf("not a regular file: %s", path)
 	}
 
-	db, err := sql.Open("sqlite", readOnlyURI(path))
+	db, err := openReadOnlyDatabase(path, "")
 	if err != nil {
 		return err
 	}
@@ -143,6 +205,11 @@ func (c *Catalog) Healthy() error {
 }
 
 func (c *Catalog) Stats() (Stats, error) {
+	c.metadataMu.Lock()
+	defer c.metadataMu.Unlock()
+	if c.statsCached {
+		return c.stats, nil
+	}
 	var s Stats
 	if err := c.db.QueryRow(`select count(*) from torrents`).Scan(&s.Torrents); err != nil {
 		return s, err
@@ -159,10 +226,17 @@ func (c *Catalog) Stats() (Stats, error) {
 	if err := c.db.QueryRow(`select count(*) from yts_torrent_data`).Scan(&s.YTSTorrentData); err != nil {
 		return s, err
 	}
+	c.stats = s
+	c.statsCached = true
 	return s, nil
 }
 
 func (c *Catalog) Categories() ([]Category, error) {
+	c.metadataMu.Lock()
+	defer c.metadataMu.Unlock()
+	if c.categoriesSet {
+		return append([]Category(nil), c.categories...), nil
+	}
 	rows, err := c.db.Query(`select id, coalesce(name, '') from categories order by id`)
 	if err != nil {
 		return nil, err
@@ -176,7 +250,12 @@ func (c *Catalog) Categories() ([]Category, error) {
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	c.categories = append([]Category(nil), items...)
+	c.categoriesSet = true
+	return items, nil
 }
 
 func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset int) ([]Torrent, error) {
@@ -191,9 +270,24 @@ func (c *Catalog) Search(q, category, sortField, sortDir string, limit, offset i
 // with the same predicate as the page query rather than relying on a derived
 // table that may not exist in the source database.
 func (c *Catalog) SearchPage(q, category, sortField, sortDir string, limit, offset int) ([]Torrent, int64, error) {
+	q = strings.TrimSpace(q)
+	category = strings.TrimSpace(category)
+	sortField = strings.TrimSpace(sortField)
+	if strings.EqualFold(strings.TrimSpace(sortDir), "desc") {
+		sortDir = "desc"
+	} else {
+		sortDir = "asc"
+	}
+	limit, offset = normalizePage(limit, offset)
+	cacheKey := searchPageCacheKey{query: q, category: category, sort: sortField, direction: sortDir, limit: limit, offset: offset}
+	if c.searchPages != nil {
+		if items, total, ok := c.searchPages.get(cacheKey); ok {
+			return items, total, nil
+		}
+	}
+
 	indexed := c.searchIndexed && strings.TrimSpace(q) != ""
 	orderBy, where, args := searchQueryFor(q, category, sortField, sortDir, indexed)
-	limit, offset = normalizePage(limit, offset)
 
 	var total int64
 	searchJoin := ""
@@ -205,6 +299,9 @@ func (c *Catalog) SearchPage(q, category, sortField, sortDir string, limit, offs
 	}
 
 	items, err := c.searchItems(orderBy, where, args, indexed, limit, offset)
+	if err == nil && c.searchPages != nil {
+		c.searchPages.put(cacheKey, items, total)
+	}
 	return items, total, err
 }
 

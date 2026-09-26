@@ -208,16 +208,9 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 	searchIndexDir := filepath.Join(filepath.Dir(statePath), "search-index")
 	searchIndexPath := ""
 	if activePath != "" {
-		searchIndexPath = catalogSearchIndexPath(searchIndexDir, selectedPath)
-		if _, err := os.Stat(searchIndexPath); os.IsNotExist(err) {
-			if err := catalog.BuildSearchIndex(selectedPath, searchIndexPath); err != nil {
-				_ = st.ClearActiveCatalog()
-				activePath = ""
-				selectedPath = dbPath
-				selectedName = "Configured catalog"
-				searchIndexPath = ""
-			}
-		} else if err != nil {
+		var indexErr error
+		searchIndexPath, indexErr = ensureCatalogSearchIndex(searchIndexDir, selectedPath)
+		if indexErr != nil {
 			_ = st.ClearActiveCatalog()
 			activePath = ""
 			selectedPath = dbPath
@@ -2322,13 +2315,17 @@ func catalogSearchIndexPath(directory, catalogPath string) string {
 }
 
 func (a *App) ensureSearchIndex(catalogPath string) (string, error) {
-	indexPath := catalogSearchIndexPath(a.searchIndexDir, catalogPath)
-	if info, err := os.Stat(indexPath); err == nil {
-		if !info.IsDir() && info.Size() > 0 {
-			return indexPath, nil
-		}
-	} else if !os.IsNotExist(err) {
+	return ensureCatalogSearchIndex(a.searchIndexDir, catalogPath)
+}
+
+func ensureCatalogSearchIndex(directory, catalogPath string) (string, error) {
+	indexPath := catalogSearchIndexPath(directory, catalogPath)
+	matches, err := catalog.SearchIndexMatches(catalogPath, indexPath)
+	if err != nil {
 		return "", err
+	}
+	if matches {
+		return indexPath, nil
 	}
 	if err := catalog.BuildSearchIndex(catalogPath, indexPath); err != nil {
 		return "", err
