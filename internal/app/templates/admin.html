@@ -157,6 +157,30 @@ band, section tabs, panels, dense record tables, and status tags.
     .step-foot { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between; gap:8px; }
     .step-foot a { font-size:12px; font-weight:700; }
 
+    /* Keep the current recovery phase and transfer meter in view while the
+       operator moves through the longer recovery form and history table. */
+    .recovery-activity {
+      position:sticky;
+      top:58px;
+      z-index:18;
+      display:grid;
+      gap:8px;
+      margin:0 0 14px;
+      padding:12px 15px;
+      border:1px solid rgba(87, 93, 61, .34);
+      border-left:4px solid var(--olive-700);
+      border-radius:12px;
+      background:rgba(247, 248, 244, .97);
+      box-shadow:0 12px 28px -20px rgba(31, 33, 23, .8);
+    }
+    .recovery-activity[hidden] { display:none; }
+    .recovery-activity-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .recovery-activity-title { margin:0; font-family:inherit; font-size:15px; font-weight:800; line-height:1.25; overflow-wrap:anywhere; }
+    .recovery-activity-detail { margin:2px 0 0; color:var(--muted); font-size:12.5px; line-height:1.4; overflow-wrap:anywhere; }
+    .recovery-activity-progress[hidden] { display:none; }
+    .recovery-activity-progress .download-progress { min-width:0; }
+    .recovery-activity-progress .download-progress progress { height:10px; }
+
     /* Status tags */
     .tag {
       display:inline-flex;
@@ -457,6 +481,7 @@ band, section tabs, panels, dense record tables, and status tags.
       .field-grid { grid-template-columns:1fr; }
       .admin-tabs { border-radius:16px; }
       .table-bar input[type="search"] { width:100%; }
+      .recovery-activity { top:54px; padding:10px 12px; }
     }
   </style>
 {{end}}
@@ -532,6 +557,17 @@ band, section tabs, panels, dense record tables, and status tags.
           <p class="panel-note">Each step leaves the previous artifact in place, so the recovery path stays inspectable and repeatable.</p>
         </div>
         <span class="tag is-ok">Operator runbook</span>
+      </div>
+      <div class="recovery-activity" id="recovery-activity" role="status" aria-live="polite" aria-atomic="false" hidden>
+        <div class="recovery-activity-head">
+          <div class="muted section-eyebrow">Current recovery</div>
+          <span class="tag is-muted" id="recovery-activity-phase">Ready</span>
+        </div>
+        <div>
+          <h3 class="recovery-activity-title" id="recovery-activity-title"></h3>
+          <p class="recovery-activity-detail" id="recovery-activity-detail"></p>
+        </div>
+        <div class="recovery-activity-progress" id="recovery-activity-progress" hidden></div>
       </div>
       <div class="steps">
         <a class="step" href="#magnet-download">
@@ -1926,6 +1962,11 @@ band, section tabs, panels, dense record tables, and status tags.
     const magnetList = document.getElementById('magnet-download-list');
     const magnetMeta = document.getElementById('magnet-list-meta');
     const magnetClientTag = document.getElementById('magnet-client-tag');
+    const recoveryActivity = document.getElementById('recovery-activity');
+    const recoveryActivityPhase = document.getElementById('recovery-activity-phase');
+    const recoveryActivityTitle = document.getElementById('recovery-activity-title');
+    const recoveryActivityDetail = document.getElementById('recovery-activity-detail');
+    const recoveryActivityProgress = document.getElementById('recovery-activity-progress');
 
     if (magnetForm && magnetStatus && magnetList) {
       const preset = document.getElementById('catalog-preset');
@@ -2015,6 +2056,42 @@ band, section tabs, panels, dense record tables, and status tags.
           '</div>';
       }
 
+      function recoveryActivityLabel(item) {
+        if (item.downloadError || item.recoveryError || item.recoveryStatus === 'failed' || item.downloadStatus === 'failed') return 'Needs attention';
+        if (item.recoveryStatus && RECOVERY_LABELS[item.recoveryStatus]) return RECOVERY_LABELS[item.recoveryStatus];
+        if (item.downloadStatus === 'starting') return 'Resolving torrent metadata';
+        if (item.downloadStatus === 'started' || item.downloadStatus === 'running') return 'Downloading archive';
+        if (item.downloadStatus === 'completed') return 'Download complete';
+        return item.downloadStatus || 'Reference saved';
+      }
+
+      function renderRecoveryActivity(items) {
+        if (!recoveryActivity) return;
+        const busy = items.find(function(item) {
+          return BUSY.indexOf(item.downloadStatus) >= 0 || item.recoveryStatus === 'waiting_for_download' || RECOVERY_BUSY.indexOf(item.recoveryStatus) >= 0;
+        });
+        const item = busy || items[0];
+        if (!item) {
+          recoveryActivity.hidden = true;
+          return;
+        }
+
+        const activeTransfer = ['starting', 'started', 'running'].indexOf(item.downloadStatus) >= 0;
+        const phase = recoveryActivityLabel(item);
+        const detail = itemDetail(item) || (activeTransfer
+          ? (item.downloadStatus === 'starting' ? 'aria2c is resolving torrent metadata and preparing the transfer.' : 'The archive is downloading to the configured recovery directory.')
+          : (item.recoveryStatus === 'loaded' ? 'The database is ready for catalog searches.' : 'The latest recovery update is shown here.'));
+        recoveryActivity.hidden = false;
+        recoveryActivityTitle.textContent = item.name || item.infoHash || item.reference || 'Catalog recovery';
+        recoveryActivityDetail.textContent = detail;
+        recoveryActivityPhase.textContent = phase;
+        recoveryActivityPhase.className = 'tag ' + (TONES[itemTone(item)] || '');
+
+        const hasProgress = activeTransfer || Number(item.totalBytes) > 0 || Number(item.downloadProgress) > 0;
+        recoveryActivityProgress.hidden = !hasProgress;
+        recoveryActivityProgress.innerHTML = hasProgress ? transferProgress(item) : '';
+      }
+
       /* The full set is kept so a filter can re-render instantly, while the
          workflow stepper always reflects every transfer, filtered or not. */
       let magnetItems = [];
@@ -2062,6 +2139,7 @@ band, section tabs, panels, dense record tables, and status tags.
         const items = result.data.items || [];
         const same = JSON.stringify(items) === JSON.stringify(magnetItems);
         magnetItems = items;
+        renderRecoveryActivity(items);
         const q = magnetQuery();
         renderMagnets(items.filter(function(item) { return magnetMatches(item, q); }));
 
