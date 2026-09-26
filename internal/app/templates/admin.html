@@ -87,7 +87,7 @@
         {{template "sectiontitle" "Download Magnet"}}
         <span class="status-badge"><span class="status-dot live"></span> aria2c dispatch</span>
       </div>
-      <p class="muted">Paste an operator-authorized magnet or .torrent URL to start aria2c immediately. Downloads are written to the configured download directory and tracked here.</p>
+      <p class="muted">Paste an operator-authorized magnet or .torrent URL to start aria2c immediately. When the transfer finishes, the app extracts, validates, and loads a compatible SQLite catalog automatically.</p>
       <form id="magnet-download-form" action="/api/admin/import-references" method="post" class="form-section">
         <label for="magnet-download-input">Magnet URI or authorized .torrent URL</label>
         <input id="magnet-download-input" name="magnet" required placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent">
@@ -1114,17 +1114,34 @@
               if (!response.ok) return;
               const data = await response.json();
               const items = data.items || [];
-              const active = items.some(function(item) { return item.downloadStatus === 'started' || item.downloadStatus === 'running'; });
-              const failed = items.some(function(item) { return item.downloadError || item.downloadStatus === 'error'; });
+              const active = items.some(function(item) {
+                return item.downloadStatus === 'started' || item.downloadStatus === 'running' || item.recoveryStatus === 'recovering' || item.recoveryStatus === 'extracting' || item.recoveryStatus === 'validating' || item.recoveryStatus === 'loading';
+              });
+              const failed = items.some(function(item) { return item.downloadError || item.recoveryError || item.downloadStatus === 'error' || item.recoveryStatus === 'failed'; });
+              const loaded = items.some(function(item) { return item.recoveryStatus === 'loaded'; });
+              const recovering = items.some(function(item) { return item.recoveryStatus === 'recovering' || item.recoveryStatus === 'extracting' || item.recoveryStatus === 'validating' || item.recoveryStatus === 'loading'; });
               const recorded = items.some(function(item) { return !item.downloadStatus; });
-              setWorkflowState(workflowDownloadState, active ? 'In progress' : (failed ? 'Attention' : (recorded ? 'Recorded' : (items.length ? 'Submitted' : 'Ready'))), active ? 'is-active' : (failed ? 'is-error' : (items.length ? 'is-ready' : '')));
+              setWorkflowState(workflowDownloadState, recovering ? 'Recovering' : (active ? 'In progress' : (failed ? 'Attention' : (loaded ? 'Loaded' : (recorded ? 'Recorded' : (items.length ? 'Submitted' : 'Ready'))))), active ? 'is-active' : (failed ? 'is-error' : (items.length ? 'is-ready' : '')));
+              if (loaded) {
+                setWorkflowState(workflowValidateState, 'Validated', 'is-ready');
+                setWorkflowState(workflowLoadState, 'Loaded', 'is-ready');
+              } else if (recovering) {
+                setWorkflowState(workflowValidateState, 'Processing', 'is-active');
+                setWorkflowState(workflowLoadState, 'Processing', 'is-active');
+              } else if (failed) {
+                setWorkflowState(workflowValidateState, 'Needs attention', 'is-error');
+                setWorkflowState(workflowLoadState, 'Blocked', 'is-error');
+              }
               magnetList.innerHTML = items.map(function(item) {
                 const rawStatus = item.downloadStatus || 'recorded';
                 const status = rawStatus === 'recorded' ? 'Recorded' : (rawStatus === 'started' || rawStatus === 'running' ? 'In progress' : rawStatus);
-                const detail = item.downloadError ? ' · ' + item.downloadError : '';
-                const tone = item.downloadError || rawStatus === 'error' ? 'is-error' : (rawStatus === 'started' || rawStatus === 'running' ? 'is-active' : 'is-ready');
+                const recoveryStatus = item.recoveryStatus ? 'Recovery: ' + item.recoveryStatus : '';
+                const detail = item.downloadError || item.recoveryError ? ' · ' + (item.downloadError || item.recoveryError) : '';
+                const tone = item.downloadError || item.recoveryError || rawStatus === 'error' || item.recoveryStatus === 'failed' ? 'is-error' : (item.recoveryStatus === 'recovering' || item.recoveryStatus === 'extracting' || item.recoveryStatus === 'validating' || item.recoveryStatus === 'loading' || rawStatus === 'started' || rawStatus === 'running' ? 'is-active' : 'is-ready');
                 const directory = item.downloadDir ? '<div class="muted">Saving to ' + escapeMagnet(item.downloadDir) + '</div>' : '';
-                return '<div class="kv download-item"><div class="download-meta"><strong>' + escapeMagnet(item.kind) + '</strong><div class="muted">' + escapeMagnet(item.name || item.infoHash || item.reference) + '</div><div class="muted magnet-link">' + escapeMagnet(item.reference) + '</div>' + directory + '</div><span class="workflow-state download-status ' + tone + '">' + escapeMagnet(status + detail) + '</span></div>';
+                const recovered = item.recoveredPath ? '<div class="muted">Loaded catalog: ' + escapeMagnet(item.recoveredPath) + '</div>' : '';
+                const labels = [status, recoveryStatus].filter(function(value) { return value !== ''; }).join(' · ');
+                return '<div class="kv download-item"><div class="download-meta"><strong>' + escapeMagnet(item.kind) + '</strong><div class="muted">' + escapeMagnet(item.name || item.infoHash || item.reference) + '</div><div class="muted magnet-link">' + escapeMagnet(item.reference) + '</div>' + directory + recovered + '</div><span class="workflow-state download-status ' + tone + '">' + escapeMagnet(labels + detail) + '</span></div>';
               }).join('') || '<div class="kv"><span>Downloads</span><span class="muted">No magnets downloaded yet.</span></div>';
             };
             magnetForm.addEventListener('submit', async function(event) {

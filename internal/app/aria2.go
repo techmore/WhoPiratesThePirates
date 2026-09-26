@@ -57,3 +57,27 @@ func resolveAria2Path() string {
 	}
 	return ""
 }
+
+func resolveArchiveExtractor() string {
+	if configured := strings.TrimSpace(os.Getenv("APP_ARCHIVE_EXTRACTOR")); configured != "" {
+		return configured
+	}
+	for _, name := range []string{"7z", "7zz"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	for _, candidate := range []string{
+		"/opt/homebrew/bin/7z",
+		"/opt/homebrew/bin/7zz",
+		"/usr/local/bin/7z",
+		"/usr/local/bin/7zz",
+		"/usr/bin/7z",
+		"/usr/bin/7zz",
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return filepath.Clean(candidate)
+		}
+	}
+	return ""
+}

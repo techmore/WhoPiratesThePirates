@@ -2349,6 +2349,58 @@ func TestAdminImportReferenceStartsConfiguredDownloadClient(t *testing.T) {
 	}
 }
 
+func TestImportReferenceRecoversAndLoadsSQLiteCatalog(t *testing.T) {
+	a, _, _ := newTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	recoveredPath := filepath.Join(t.TempDir(), "recovered.sqlite")
+	seedCatalog(t, recoveredPath)
+	db, err := sql.Open("sqlite", recoveredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("update torrents set name = 'Recovered search item'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	magnet := "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Recovered%20backup"
+	item, err := a.state.CreateImportReference("magnet", magnet, "0123456789ABCDEF0123456789ABCDEF01234567", "Recovered backup", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.recoverReference(item.ID, item.Reference, item.Name, filepath.Dir(recoveredPath))
+
+	name, _, _ := a.catalogInfo()
+	if name != "Recovered backup" {
+		t.Fatalf("expected recovered catalog to become active, got %q", name)
+	}
+	items, total, err := a.catalogSearchPage("Recovered search item", "", "", "", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(items) != 1 || items[0].Name != "Recovered search item" {
+		t.Fatalf("expected recovered catalog to be searchable, got total=%d items=%#v", total, items)
+	}
+
+	stored, err := a.state.ImportReference(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.RecoveryStatus != "loaded" || stored.RecoveredPath != recoveredPath {
+		t.Fatalf("unexpected persisted recovery status: %#v", stored)
+	}
+	sources, err := a.state.CatalogSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].Magnet != magnet || sources[0].CatalogPath != recoveredPath || !sources[0].Enabled {
+		t.Fatalf("expected loaded magnet to become a customer source, got %#v", sources)
+	}
+}
+
 func TestCatalogSourcesPublicEndpointReturnsEnabledMagnetsOnly(t *testing.T) {
 	a, _ := newAdminTestApp(t, testAdminPassword)
 	defer a.Close()

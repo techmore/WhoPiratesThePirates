@@ -29,24 +29,26 @@ import (
 )
 
 type App struct {
-	catalog         *catalog.Catalog
-	catalogMu       sync.RWMutex
-	catalogPath     string
-	catalogName     string
-	catalogRevision uint64
-	version         string
-	recoveryDir     string
-	downloadDir     string
-	aria2Path       string
-	state           *state.Store
-	adminPass       string
-	secret          []byte
-	secureCookies   bool
-	loginAttempts   map[string]loginAttempt
-	loginMu         sync.Mutex
-	downloadMu      sync.RWMutex
-	downloads       map[int64]downloadStatus
-	embedded        map[string]*template.Template
+	catalog          *catalog.Catalog
+	catalogMu        sync.RWMutex
+	catalogPath      string
+	catalogName      string
+	catalogRevision  uint64
+	version          string
+	recoveryDir      string
+	downloadDir      string
+	aria2Path        string
+	archiveExtractor string
+	state            *state.Store
+	adminPass        string
+	secret           []byte
+	secureCookies    bool
+	loginAttempts    map[string]loginAttempt
+	loginMu          sync.Mutex
+	downloadMu       sync.RWMutex
+	downloads        map[int64]downloadStatus
+	recoveryMu       sync.Mutex
+	embedded         map[string]*template.Template
 }
 
 const maxRequestBodyBytes int64 = 1 << 20
@@ -66,11 +68,14 @@ type loginAttempt struct {
 }
 
 type downloadStatus struct {
-	Status    string `json:"status"`
-	Started   bool   `json:"started"`
-	PID       int    `json:"pid,omitempty"`
-	Directory string `json:"directory,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Status         string `json:"status"`
+	Started        bool   `json:"started"`
+	PID            int    `json:"pid,omitempty"`
+	Directory      string `json:"directory,omitempty"`
+	Error          string `json:"error,omitempty"`
+	RecoveryStatus string `json:"recoveryStatus,omitempty"`
+	RecoveredPath  string `json:"recoveredPath,omitempty"`
+	RecoveryError  string `json:"recoveryError,omitempty"`
 }
 
 func configuredDownloadDir(statePath string) string {
@@ -154,6 +159,7 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 	if aria2Path == "" {
 		aria2Path = resolveAria2Path()
 	}
+	archiveExtractor := resolveArchiveExtractor()
 	embedded, err := loadEmbeddedTemplates(releaseVersion)
 	if err != nil {
 		_ = db.Close()
@@ -161,23 +167,26 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 		return nil, err
 	}
 
-	return &App{
-		catalog:         db,
-		catalogPath:     selectedPath,
-		catalogName:     selectedName,
-		catalogRevision: 1,
-		version:         releaseVersion,
-		recoveryDir:     filepath.Join(filepath.Dir(statePath), "recovery-catalogs"),
-		downloadDir:     configuredDownloadDir(statePath),
-		aria2Path:       aria2Path,
-		state:           st,
-		adminPass:       os.Getenv("ADMIN_PASSWORD"),
-		secret:          secret,
-		secureCookies:   options.SecureCookies,
-		loginAttempts:   make(map[string]loginAttempt),
-		downloads:       make(map[int64]downloadStatus),
-		embedded:        embedded,
-	}, nil
+	app := &App{
+		catalog:          db,
+		catalogPath:      selectedPath,
+		catalogName:      selectedName,
+		catalogRevision:  1,
+		version:          releaseVersion,
+		recoveryDir:      filepath.Join(filepath.Dir(statePath), "recovery-catalogs"),
+		downloadDir:      configuredDownloadDir(statePath),
+		aria2Path:        aria2Path,
+		archiveExtractor: archiveExtractor,
+		state:            st,
+		adminPass:        os.Getenv("ADMIN_PASSWORD"),
+		secret:           secret,
+		secureCookies:    options.SecureCookies,
+		loginAttempts:    make(map[string]loginAttempt),
+		downloads:        make(map[int64]downloadStatus),
+		embedded:         embedded,
+	}
+	go app.resumeReferenceRecovery()
+	return app, nil
 }
 
 func (a *App) Close() error {
@@ -1292,7 +1301,7 @@ func (a *App) handleAdminImportReferences(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	status := a.startReferenceDownload(item.ID, parsed.Reference)
+	status := a.startReferenceDownload(item)
 	a.applyDownloadStatus(&item, status)
 	_ = a.state.Audit("import_reference_recorded", fmt.Sprintf("kind=%s info_hash=%s download=%s", item.Kind, item.InfoHash, status.Status))
 	writeJSON(w, map[string]any{"reference": item, "download": status})
@@ -1321,15 +1330,18 @@ func (a *App) handleAdminImportReferencesList(w http.ResponseWriter, r *http.Req
 	writeJSON(w, map[string]any{"items": items})
 }
 
-func (a *App) startReferenceDownload(id int64, reference string) downloadStatus {
+func (a *App) startReferenceDownload(item state.ImportReference) downloadStatus {
+	id := item.ID
+	reference := item.Reference
 	aria2Path := a.aria2Path
 	if aria2Path == "" {
 		status := downloadStatus{Status: "client_unavailable", Error: "aria2c is not installed or not configured; install aria2c or set APP_ARIA2_PATH"}
 		a.setDownloadStatus(id, status)
 		return status
 	}
-	if err := os.MkdirAll(a.downloadDir, 0o700); err != nil {
-		status := downloadStatus{Status: "not_started", Directory: a.downloadDir, Error: fmt.Sprintf("create download directory: %v", err)}
+	downloadDir := filepath.Join(a.downloadDir, fmt.Sprintf("reference-%d", id))
+	if err := os.MkdirAll(downloadDir, 0o700); err != nil {
+		status := downloadStatus{Status: "not_started", Directory: downloadDir, Error: fmt.Sprintf("create download directory: %v", err)}
 		a.setDownloadStatus(id, status)
 		return status
 	}
@@ -1341,7 +1353,7 @@ func (a *App) startReferenceDownload(id int64, reference string) downloadStatus 
 		return status
 	}
 	command := exec.Command(aria2Path,
-		"--dir="+a.downloadDir,
+		"--dir="+downloadDir,
 		"--continue=true",
 		"--auto-file-renaming=true",
 		"--allow-overwrite=false",
@@ -1351,22 +1363,28 @@ func (a *App) startReferenceDownload(id int64, reference string) downloadStatus 
 	command.Stderr = logFile
 	if err := command.Start(); err != nil {
 		_ = logFile.Close()
-		status := downloadStatus{Status: "not_started", Directory: a.downloadDir, Error: fmt.Sprintf("start aria2c: %v", err)}
+		status := downloadStatus{Status: "not_started", Directory: downloadDir, Error: fmt.Sprintf("start aria2c: %v", err)}
 		a.setDownloadStatus(id, status)
 		return status
 	}
-	status := downloadStatus{Status: "started", Started: true, PID: command.Process.Pid, Directory: a.downloadDir}
+	status := downloadStatus{Status: "started", Started: true, PID: command.Process.Pid, Directory: downloadDir, RecoveryStatus: "waiting_for_download"}
 	a.setDownloadStatus(id, status)
 	go func() {
 		err := command.Wait()
 		_ = logFile.Close()
-		completed := downloadStatus{Status: "completed", Directory: a.downloadDir}
+		completed := downloadStatus{Status: "completed", Directory: downloadDir}
 		if err != nil {
 			completed.Status = "failed"
 			completed.Error = err.Error()
+			completed.RecoveryStatus = "download_failed"
+		} else {
+			completed.RecoveryStatus = "recovering"
 		}
 		a.setDownloadStatus(id, completed)
 		_ = a.state.Audit("import_reference_download_finished", fmt.Sprintf("id=%d status=%s error=%v", id, completed.Status, err))
+		if err == nil {
+			a.recoverReference(id, item.Reference, item.Name, downloadDir)
+		}
 	}()
 	return status
 }
@@ -1375,6 +1393,8 @@ func (a *App) setDownloadStatus(id int64, status downloadStatus) {
 	a.downloadMu.Lock()
 	a.downloads[id] = status
 	a.downloadMu.Unlock()
+	_ = a.state.UpdateImportReferenceDownload(id, status.Status, status.PID, status.Directory, status.Error)
+	_ = a.state.UpdateImportReferenceRecovery(id, status.RecoveryStatus, status.RecoveredPath, status.RecoveryError)
 }
 
 func (a *App) downloadStatus(id int64) (downloadStatus, bool) {
@@ -1389,6 +1409,9 @@ func (a *App) applyDownloadStatus(item *state.ImportReference, status downloadSt
 	item.DownloadPID = status.PID
 	item.DownloadDir = status.Directory
 	item.DownloadError = status.Error
+	item.RecoveryStatus = status.RecoveryStatus
+	item.RecoveredPath = status.RecoveredPath
+	item.RecoveryError = status.RecoveryError
 }
 
 func (a *App) handleAdminCatalogSources(w http.ResponseWriter, r *http.Request) {
@@ -1917,6 +1940,10 @@ func (a *App) replaceCatalog(path, name string) error {
 	if err := catalog.Validate(path); err != nil {
 		return fmt.Errorf("catalog validation failed: %w", err)
 	}
+	return a.replaceCatalogValidated(path, name)
+}
+
+func (a *App) replaceCatalogValidated(path, name string) error {
 	next, err := catalog.Open(path)
 	if err != nil {
 		return fmt.Errorf("open catalog: %w", err)

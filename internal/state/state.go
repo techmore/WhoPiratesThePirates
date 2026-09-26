@@ -2,6 +2,7 @@ package state
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -64,6 +65,9 @@ type ImportReference struct {
 	DownloadPID    int    `json:"downloadPid,omitempty"`
 	DownloadDir    string `json:"downloadDir,omitempty"`
 	DownloadError  string `json:"downloadError,omitempty"`
+	RecoveryStatus string `json:"recoveryStatus,omitempty"`
+	RecoveredPath  string `json:"recoveredPath,omitempty"`
+	RecoveryError  string `json:"recoveryError,omitempty"`
 }
 
 // CatalogSource is an operator-managed recovery entry. Magnet is the
@@ -120,11 +124,54 @@ func ensureSchema(db *sql.DB) error {
 		`create table if not exists import_sources (id integer primary key autoincrement, name text not null, kind text not null, location text not null, enabled integer not null default 1, created_at integer not null)`,
 		`create table if not exists import_runs (id integer primary key autoincrement, source_id integer not null, status text not null, started_at integer not null, finished_at integer not null default 0, message text not null default '', checksum text not null default '', approved_ref text not null default '', foreign key(source_id) references import_sources(id))`,
 		`create table if not exists import_manifests (id integer primary key autoincrement, name text not null, approved_by text not null, base_dir text not null, checksum text not null, preview_checksum text not null, total_bytes integer not null, created_at integer not null)`,
-		`create table if not exists import_references (id integer primary key autoincrement, kind text not null, reference text not null, info_hash text not null default '', name text not null default '', trackers text not null default '', created_at integer not null)`,
+		`create table if not exists import_references (id integer primary key autoincrement, kind text not null, reference text not null, info_hash text not null default '', name text not null default '', trackers text not null default '', created_at integer not null, download_status text not null default '', download_pid integer not null default 0, download_dir text not null default '', download_error text not null default '', recovery_status text not null default '', recovered_path text not null default '', recovery_error text not null default '')`,
 		`create table if not exists catalog_sources (id integer primary key autoincrement, name text not null, magnet text not null default '', catalog_path text not null default '', enabled integer not null default 1, created_at integer not null)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return ensureImportReferenceColumns(db)
+}
+
+func ensureImportReferenceColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(import_references)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	existing := make(map[string]struct{})
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{name: "download_status", definition: "text not null default ''"},
+		{name: "download_pid", definition: "integer not null default 0"},
+		{name: "download_dir", definition: "text not null default ''"},
+		{name: "download_error", definition: "text not null default ''"},
+		{name: "recovery_status", definition: "text not null default ''"},
+		{name: "recovered_path", definition: "text not null default ''"},
+		{name: "recovery_error", definition: "text not null default ''"},
+	}
+	for _, column := range columns {
+		if _, ok := existing[column.name]; ok {
+			continue
+		}
+		if _, err := db.Exec(`alter table import_references add column ` + column.name + ` ` + column.definition); err != nil {
 			return err
 		}
 	}
@@ -452,8 +499,18 @@ func (s *Store) CreateImportReference(kind, reference, infoHash, name, trackers 
 	return item, err
 }
 
+func (s *Store) ImportReference(id int64) (ImportReference, error) {
+	var item ImportReference
+	err := s.db.QueryRow(`select id, kind, reference, info_hash, name, trackers, created_at, download_status, download_pid, download_dir, download_error, recovery_status, recovered_path, recovery_error from import_references where id = ?`, id).Scan(
+		&item.ID, &item.Kind, &item.Reference, &item.InfoHash, &item.Name, &item.Trackers, &item.CreatedAt,
+		&item.DownloadStatus, &item.DownloadPID, &item.DownloadDir, &item.DownloadError,
+		&item.RecoveryStatus, &item.RecoveredPath, &item.RecoveryError,
+	)
+	return item, err
+}
+
 func (s *Store) ImportReferences(limit int) ([]ImportReference, error) {
-	rows, err := s.db.Query(`select id, kind, reference, info_hash, name, trackers, created_at from import_references order by id desc limit ?`, limit)
+	rows, err := s.db.Query(`select id, kind, reference, info_hash, name, trackers, created_at, download_status, download_pid, download_dir, download_error, recovery_status, recovered_path, recovery_error from import_references order by id desc limit ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -461,12 +518,26 @@ func (s *Store) ImportReferences(limit int) ([]ImportReference, error) {
 	items := make([]ImportReference, 0, limit)
 	for rows.Next() {
 		var item ImportReference
-		if err := rows.Scan(&item.ID, &item.Kind, &item.Reference, &item.InfoHash, &item.Name, &item.Trackers, &item.CreatedAt); err != nil {
+		if err := rows.Scan(
+			&item.ID, &item.Kind, &item.Reference, &item.InfoHash, &item.Name, &item.Trackers, &item.CreatedAt,
+			&item.DownloadStatus, &item.DownloadPID, &item.DownloadDir, &item.DownloadError,
+			&item.RecoveryStatus, &item.RecoveredPath, &item.RecoveryError,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *Store) UpdateImportReferenceDownload(id int64, status string, pid int, directory, downloadError string) error {
+	_, err := s.db.Exec(`update import_references set download_status = ?, download_pid = ?, download_dir = ?, download_error = ? where id = ?`, status, pid, directory, downloadError, id)
+	return err
+}
+
+func (s *Store) UpdateImportReferenceRecovery(id int64, status, recoveredPath, recoveryError string) error {
+	_, err := s.db.Exec(`update import_references set recovery_status = ?, recovered_path = ?, recovery_error = ? where id = ?`, status, recoveredPath, recoveryError, id)
+	return err
 }
 
 func (s *Store) DeleteImportReference(id int64) error {
@@ -548,6 +619,21 @@ func (s *Store) CreateCatalogSource(name, magnet, catalogPath string, enabled bo
 		name, magnet, catalogPath, boolToInt(enabled), time.Now().Unix(),
 	)
 	return err
+}
+
+func (s *Store) EnsureCatalogSource(name, magnet, catalogPath string, enabled bool) error {
+	if strings.TrimSpace(magnet) != "" {
+		var id int64
+		err := s.db.QueryRow(`select id from catalog_sources where magnet = ? order by id desc limit 1`, magnet).Scan(&id)
+		if err == nil {
+			_, err = s.db.Exec(`update catalog_sources set name = ?, catalog_path = ?, enabled = ? where id = ?`, name, catalogPath, boolToInt(enabled), id)
+			return err
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	return s.CreateCatalogSource(name, magnet, catalogPath, enabled)
 }
 
 func (s *Store) UpdateCatalogSource(id int64, name, magnet, catalogPath string) error {
