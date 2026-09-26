@@ -19,8 +19,9 @@ band, section tabs, panels, dense record tables, and status tags.
     .admin .meta-row,
     .admin .step,
     .admin .callout { backdrop-filter:none; }
-    .admin { display:grid; gap:14px; padding-bottom:2rem; }
+    .admin { display:grid; gap:14px; padding-bottom:2rem; min-width:0; }
     .admin :focus-visible { outline:2px solid var(--olive-700); outline-offset:2px; }
+    .admin-head, .admin-panel, .panel, .steps, .step, .field-grid, .field-grid-3 { min-width:0; }
 
     /* Header band */
     .admin-head { display:grid; gap:16px; padding:20px 22px 22px; }
@@ -209,6 +210,8 @@ band, section tabs, panels, dense record tables, and status tags.
 
     /* Record tables */
     .table-scroll {
+      min-width:0;
+      max-width:100%;
       overflow-x:auto;
       border:1px solid var(--line-soft);
       border-radius:var(--radius-sm);
@@ -1232,34 +1235,100 @@ band, section tabs, panels, dense record tables, and status tags.
       showPanel(panelFor(window.location.hash) || stored, false);
     })();
 
-    /* ------------------------------------------------- destructive actions */
-    /* Row actions share one form per record and differ by formaction, so a
-       confirmed action is posted to the trigger's own URL. form.submit() would
-       drop formaction and silently hit the form's default action instead. */
+    /* -------------------------------------------------------------- toasts */
+    /* Every mutation reports through one stack, so a save, a toggle and a
+       delete all read the same way and none of them reload the page. */
+    const toastHost = document.getElementById('toasts');
+    function toast(message, tone, detail) {
+      if (!toastHost) return null;
+      const node = document.createElement('div');
+      node.className = 'toast' + (tone ? ' is-' + tone : '');
+      const body = document.createElement('p');
+      body.textContent = message;
+      node.appendChild(body);
+      if (detail) {
+        const note = document.createElement('small');
+        note.textContent = detail;
+        node.appendChild(note);
+      }
+      const dismiss = document.createElement('button');
+      dismiss.type = 'button';
+      dismiss.setAttribute('aria-label', 'Dismiss notification');
+      dismiss.textContent = '×';
+      dismiss.addEventListener('click', function() { node.remove(); });
+      node.appendChild(dismiss);
+      toastHost.appendChild(node);
+      setTimeout(function() { node.remove(); }, tone === 'error' ? 9000 : 4200);
+      while (toastHost.children.length > 4) toastHost.firstElementChild.remove();
+      return node;
+    }
+
+    /* Refresh hooks are registered once the tables and status loader exist, so a
+       mutation firing during startup cannot reach a half-built view. */
+    let refreshHooks = [];
+    let refreshStatus = function() {};
+    function afterMutation() {
+      refreshHooks.forEach(function(hook) {
+        try { hook(); } catch (err) { /* one broken view must not block the rest */ }
+      });
+    }
+
+    function serverMessage(result, fallback) {
+      const data = result.data;
+      if (data && typeof data.error === 'string' && data.error) return data.error;
+      const text = (result.text || '').trim();
+      if (!text) return fallback;
+      if (text.charAt(0) === '{' || text.charAt(0) === '<') return fallback;
+      return text;
+    }
+
+    /* Row actions share one form per record and differ by formaction, so the
+       trigger's own URL is the one that gets posted. */
+    async function submitMutation(form, trigger) {
+      const action = (trigger && trigger.getAttribute('formaction')) || form.getAttribute('action') || '';
+      const label = (trigger && (trigger.getAttribute('data-verb') || trigger.textContent.trim())) || 'Saved';
+      const row = trigger ? trigger.closest('tr') : null;
+      if (trigger) trigger.classList.add('is-busy');
+      if (row) row.classList.add('row-busy');
+      try {
+        const result = await fetchJSON(action, { method: 'POST', body: new FormData(form, trigger) });
+        if (!result.ok) {
+          const detail = result.status === 409 || result.status === 400
+            ? 'The record could not be changed. It may still be referenced.'
+            : serverMessage(result, 'The server rejected the request.');
+          toast(label + ' failed', 'error', detail);
+          return false;
+        }
+        toast(label, 'ok');
+        // Panels rendered by the server have no client-side list to refresh, so
+        // a change inside one still needs a real reload. The tab survives it.
+        if (form.closest('[data-static]')) {
+          window.location.reload();
+          return true;
+        }
+        afterMutation();
+        return true;
+      } catch (err) {
+        toast(label + ' failed', 'error', 'The console could not reach the server.');
+        return false;
+      } finally {
+        if (trigger) trigger.classList.remove('is-busy');
+        if (row) row.classList.remove('row-busy');
+      }
+    }
+
+    /* One submit path for every admin form. Forms with bespoke handling opt out
+       with data-handled, and sign-out opts out with data-native so the browser
+       still navigates. Without JavaScript the markup posts exactly as before. */
     document.addEventListener('submit', function(event) {
       const form = event.target;
+      if (!form || form.nodeName !== 'FORM') return;
+      if (form.hasAttribute('data-handled') || form.hasAttribute('data-native')) return;
       const trigger = event.submitter;
       const message = trigger && trigger.getAttribute('data-confirm');
-      if (!message) return;
       event.preventDefault();
-      if (!window.confirm(message)) return;
-      const url = trigger.getAttribute('formaction') || form.action;
-      fetch(url, { method: 'POST', body: new FormData(form) }).then(function(response) {
-        if (!response.ok) {
-          window.alert(response.status === 409 || response.status === 400
-            ? 'The record could not be removed. It may still be referenced.'
-            : 'The request failed with status ' + response.status + '.');
-          return;
-        }
-        const managed = form.closest('tbody[data-managed]');
-        if (managed) {
-          reloadTables();
-        } else {
-          window.location.reload();
-        }
-      }).catch(function() {
-        window.alert('The request could not be sent.');
-      });
+      if (message && !window.confirm(message)) return;
+      submitMutation(form, trigger);
     });
 
     /* -------------------------------------------------------- status strip */
@@ -1342,6 +1411,7 @@ band, section tabs, panels, dense record tables, and status tags.
           setTag(document.getElementById('admin-transfer-state'), 'Unavailable', 'error');
         }
       }
+      refreshStatus = loadStatus;
       statusRefresh.addEventListener('click', loadStatus);
       statusAuto.addEventListener('change', function() {
         statusTicker.enabled = statusAuto.checked;
@@ -1363,12 +1433,39 @@ band, section tabs, panels, dense record tables, and status tags.
       const exportLink = document.getElementById(config.exportLink);
       const prev = config.pager ? document.getElementById(config.pager.prev) : null;
       const next = config.pager ? document.getElementById(config.pager.next) : null;
-      const table = { limit: config.limit || 10, offset: 0, selectedId: 0 };
+      const table = { limit: config.limit || 10, offset: 0, selectedId: 0, lastKey: '', paused: false };
       const ticker = { ms: REFRESH_MS, run: load, timer: null, enabled: auto ? auto.checked : false };
       if (auto) tickers.push(ticker);
       /* Marks the tbody as progressively enhanced, so a confirmed row action
          can refresh this table in place instead of reloading the page. */
       body.setAttribute('data-managed', 'true');
+
+      /* An operator halfway through an edit must never have the row yanked out
+         from under the cursor by a background refresh. While a cell has focus,
+         or the inspector is open, the ticker stands down and catches up as soon
+         as the operator is done. */
+      function busy() {
+        return body.contains(document.activeElement) || body.querySelector('.row-detail') !== null;
+      }
+
+      function setPaused(paused) {
+        if (table.paused === paused) return;
+        table.paused = paused;
+        if (auto) {
+          auto.disabled = paused;
+          if (meta && !meta.querySelector('.ticker-paused')) {
+            const note = document.createElement('span');
+            note.className = 'ticker-paused';
+            note.textContent = 'auto-refresh held while you edit';
+            meta.appendChild(note);
+          }
+        }
+      }
+
+      body.addEventListener('focusin', function() { setPaused(true); });
+      body.addEventListener('focusout', function() {
+        setTimeout(function() { setPaused(busy()); }, 0);
+      });
 
       function query() {
         return filter && filter.value ? filter.value.trim() : '';
@@ -1393,16 +1490,29 @@ band, section tabs, panels, dense record tables, and status tags.
 
       async function toggleDetail(id, row) {
         if (table.selectedId === id) {
-          table.selectedId = 0;
-          const existing = body.querySelector('.row-detail');
-          if (existing) existing.remove();
-          body.querySelectorAll('[aria-selected="true"]').forEach(function(node) { node.removeAttribute('aria-selected'); });
+          closeDetail();
           return;
         }
         body.querySelectorAll('.row-detail').forEach(function(node) { node.remove(); });
         body.querySelectorAll('[aria-selected="true"]').forEach(function(node) { node.removeAttribute('aria-selected'); });
         table.selectedId = id;
         row.setAttribute('aria-selected', 'true');
+        row.querySelectorAll('[data-select-id]').forEach(function(button) { button.setAttribute('aria-expanded', 'true'); });
+        await showDetail(row, id);
+      }
+
+      function closeDetail() {
+        table.selectedId = 0;
+        const existing = body.querySelector('.row-detail');
+        if (existing) existing.remove();
+        body.querySelectorAll('[aria-selected="true"]').forEach(function(node) {
+          node.removeAttribute('aria-selected');
+          node.querySelectorAll('[data-select-id]').forEach(function(button) { button.setAttribute('aria-expanded', 'false'); });
+        });
+        setPaused(busy());
+      }
+
+      async function showDetail(row, id) {
         const detail = document.createElement('tr');
         detail.className = 'row-detail';
         const cell = document.createElement('td');
@@ -1422,17 +1532,49 @@ band, section tabs, panels, dense record tables, and status tags.
         }
       }
 
-      async function load() {
+      /* A background refresh repaints the tbody, so the inspector has to be
+         re-attached to the row that still holds the selected id. */
+      function reopenDetail() {
+        const row = body.querySelector('tr[data-row-id="' + table.selectedId + '"]');
+        if (!row) {
+          closeDetail();
+          return;
+        }
+        row.setAttribute('aria-selected', 'true');
+        showDetail(row, table.selectedId);
+      }
+
+      async function load(options) {
+        const force = Boolean(options && options.force);
+        if (!force && busy()) {
+          setPaused(true);
+          return;
+        }
         const params = 'limit=' + table.limit + '&offset=' + table.offset + '&q=' + encodeURIComponent(query());
         try {
           const result = await fetchJSON(config.list + '?' + params);
           if (!result.ok || !result.data) throw new Error(result.text || 'request failed');
           const items = result.data.items || [];
-          renderRows(items);
+          const stamp = new Date().toLocaleTimeString();
+          /* Re-rendering an identical page would steal focus from a cell the
+             operator is still in, so only paint when something actually moved. */
+          const key = table.offset + '|' + query() + '|' + JSON.stringify(items);
+          if (key !== table.lastKey) {
+            table.lastKey = key;
+            renderRows(items);
+            if (table.selectedId) reopenDetail();
+          }
           if (meta) {
+            const total = typeof result.data.total === 'number' ? result.data.total : null;
+            const first = result.data.offset + 1;
+            const last = result.data.offset + items.length;
             meta.textContent = items.length
-              ? 'Rows ' + (result.data.offset + 1) + '–' + (result.data.offset + items.length) + ' · next offset ' + result.data.nextOffset + ' · updated ' + new Date().toLocaleTimeString()
-              : 'No rows for this page · updated ' + new Date().toLocaleTimeString();
+              ? 'Rows ' + first + '–' + last + (total === null ? '' : ' of ' + total) +
+                (query() ? ' matching “' + query() + '”' : '') +
+                ' · updated ' + stamp
+              : (query()
+                ? 'No rows match “' + query() + '” · updated ' + stamp
+                : (total === 0 ? 'No rows recorded yet · updated ' + stamp : 'No rows on this page · updated ' + stamp));
           }
           if (prev) {
             prev.disabled = table.offset === 0;
@@ -1455,25 +1597,30 @@ band, section tabs, panels, dense record tables, and status tags.
           pending = setTimeout(function() {
             table.offset = 0;
             table.selectedId = 0;
-            load();
+            load({ force: true });
           }, 250);
         });
       }
       if (prev) prev.addEventListener('click', function() {
         table.offset = Number(prev.dataset.offset || '0');
-        load();
+        table.selectedId = 0;
+        load({ force: true });
       });
       if (next) next.addEventListener('click', function() {
         table.offset = Number(next.dataset.offset || '0');
-        load();
+        table.selectedId = 0;
+        load({ force: true });
       });
       if (auto) auto.addEventListener('change', function() {
         ticker.enabled = auto.checked;
         restartTicker(ticker);
       });
       syncExport();
-      load();
-      return { reload: load, table: table };
+      load({ force: true });
+      /* The auto-refresh timer has to be armed here, not only from the change
+         handler, or a table that ships with "Auto" checked never refreshes. */
+      restartTicker(ticker);
+      return { reload: function() { return load({ force: true }); }, table: table };
     }
 
     const sourcesTable = attachTable({
@@ -1496,7 +1643,8 @@ band, section tabs, panels, dense record tables, and status tags.
         return '<tr data-row-id="' + item.id + '">' +
           '<td class="cell-id">' + item.id + '</td>' +
           '<td><div class="stack"><button type="button" class="row-select" data-select-id="' + item.id + '">' + escapeHtml(item.name) + '</button>' +
-          '<input form="' + form + '" name="location" value="' + escapeHtml(item.location) + '" aria-label="Source location" class="mono"></div></td>' +
+          '<div class="cell-value"><input form="' + form + '" name="location" value="' + escapeHtml(item.location) + '" aria-label="Source location" class="mono">' +
+          (item.location ? copyButton(item.location, 'Copy') : '') + '</div></div></td>' +
           '<td><input form="' + form + '" name="kind" value="' + escapeHtml(item.kind) + '" aria-label="Source kind"></td>' +
           '<td class="nowrap muted">' + escapeHtml(formatTime(item.createdAt)) + '</td>' +
           '<td>' + (item.enabled ? '<span class="tag is-ok">Enabled</span>' : '<span class="tag is-muted">Disabled</span>') + '</td>' +
@@ -1601,8 +1749,16 @@ band, section tabs, panels, dense record tables, and status tags.
       tables.forEach(function(entry) { entry.reload(); });
     }
 
+    /* Every mutation writes audit rows and changes the header counts, so one
+       successful action refreshes the paged views and the status strip. */
+    refreshHooks = [
+      reloadTables,
+      function() { refreshStatus(); },
+    ];
+
     /* Keep the tab labels honest about how much state exists. Tabs without a
-       count (Recovery, Settings) keep a bare label. */    function refreshTabCounts(data) {
+       count (Recovery, Settings) keep a bare label. */
+    function refreshTabCounts(data) {
       const counts = {
         'catalog-source-admin': data.catalogSourceCount || 0,
         'import-state': data.importSourceCount || 0,
@@ -1692,8 +1848,10 @@ band, section tabs, panels, dense record tables, and status tags.
               return '<tr>' +
                 '<td class="nowrap">' + escapeHtml(item.kind) + '</td>' +
                 '<td><span class="truncate" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</span></td>' +
-                '<td><span class="truncate mono" title="' + escapeHtml(item.reference) + '">' + escapeHtml(item.reference) + '</span></td>' +
-                '<td class="mono muted"><span class="truncate" title="' + escapeHtml(destination) + '">' + escapeHtml(destination || '—') + '</span></td>' +
+                '<td><div class="cell-value"><span class="truncate mono" title="' + escapeHtml(item.reference) + '">' + escapeHtml(item.reference) + '</span>' +
+                copyButton(item.reference, 'Copy') + '</div></td>' +
+                '<td class="mono muted"><div class="cell-value"><span class="truncate" title="' + escapeHtml(destination) + '">' + escapeHtml(destination || '—') + '</span>' +
+                (destination ? copyButton(destination, 'Copy') : '') + '</div></td>' +
                 '<td><span class="tag ' + (TONES[itemTone(item)] || '') + '">' + escapeHtml(itemLabel(item)) + '</span></td>' +
                 '</tr>';
             }).join('')
@@ -1825,6 +1983,138 @@ band, section tabs, panels, dense record tables, and status tags.
           }
         });
       }
+    }
+
+    /* --------------------------------------------------------- copy to board */
+    /* Magnets, info hashes and absolute paths are the values an operator most
+       often needs to paste into a terminal or a ticket. */
+    async function copyText(value, button) {
+      const original = button.getAttribute('data-label') || button.textContent;
+      button.setAttribute('data-label', original);
+      try {
+        await navigator.clipboard.writeText(value);
+        button.textContent = 'Copied';
+      } catch (err) {
+        button.textContent = 'Copy failed';
+      }
+      setTimeout(function() { button.textContent = original; }, 1200);
+    }
+
+    function copyButton(value, label) {
+      return '<button type="button" class="copy" data-copy="' + escapeHtml(value) + '">' + escapeHtml(label || 'Copy') + '</button>';
+    }
+
+    document.addEventListener('click', function(event) {
+      const button = event.target.closest ? event.target.closest('[data-copy]') : null;
+      if (!button) return;
+      event.preventDefault();
+      const value = button.getAttribute('data-copy');
+      if (value) copyText(value, button);
+    });
+
+    /* ------------------------------------------------- density and shortcuts */
+    const adminRoot = document.getElementById('admin-root');
+    const densityToggle = document.getElementById('density-toggle');
+    const DENSITY_KEY = 'wptp.admin.density';
+
+    function setDensity(density) {
+      if (!adminRoot) return;
+      adminRoot.dataset.density = density;
+      if (densityToggle) {
+        densityToggle.setAttribute('aria-pressed', density === 'compact' ? 'true' : 'false');
+        densityToggle.textContent = density === 'compact' ? 'Comfortable rows' : 'Compact rows';
+      }
+      try { sessionStorage.setItem(DENSITY_KEY, density); } catch (err) { /* storage is optional */ }
+    }
+
+    if (densityToggle) {
+      let stored = 'comfortable';
+      try { stored = sessionStorage.getItem(DENSITY_KEY) || 'comfortable'; } catch (err) { /* storage is optional */ }
+      setDensity(stored === 'compact' ? 'compact' : 'comfortable');
+      densityToggle.addEventListener('click', function() {
+        setDensity(adminRoot.dataset.density === 'compact' ? 'comfortable' : 'compact');
+      });
+    }
+
+    const shortcutHelp = document.getElementById('shortcut-help');
+    const shortcutOpen = document.getElementById('shortcut-help-open');
+    const shortcutClose = document.getElementById('shortcut-help-close');
+
+    function setShortcutHelp(open) {
+      if (!shortcutHelp) return;
+      shortcutHelp.hidden = !open;
+      if (open && shortcutClose) shortcutClose.focus();
+    }
+
+    if (shortcutOpen) shortcutOpen.addEventListener('click', function() { setShortcutHelp(true); });
+    if (shortcutClose) shortcutClose.addEventListener('click', function() { setShortcutHelp(false); });
+    if (shortcutHelp) {
+      shortcutHelp.addEventListener('click', function(event) {
+        if (event.target === shortcutHelp) setShortcutHelp(false);
+      });
+    }
+
+    function activePanel() {
+      return panels.filter(function(panel) { return !panel.hidden; })[0] || panels[0];
+    }
+
+    function isTypingTarget(node) {
+      if (!node) return false;
+      const tag = node.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || node.isContentEditable;
+    }
+
+    document.addEventListener('keydown', function(event) {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === 'Escape') {
+        if (shortcutHelp && !shortcutHelp.hidden) { setShortcutHelp(false); return; }
+        if (isTypingTarget(event.target)) { event.target.blur(); return; }
+        const closeDetail = closeOpenDetail();
+        if (closeDetail) closeDetail();
+        return;
+      }
+      if (isTypingTarget(event.target)) return;
+      if (!shortcutHelp || shortcutHelp.hidden) {
+        if (event.key >= '1' && event.key <= '9') {
+          const tab = tabs[Number(event.key) - 1];
+          if (tab) { event.preventDefault(); tab.click(); }
+          return;
+        }
+        if (event.key === '/') {
+          const panel = activePanel();
+          const input = panel && panel.querySelector('input[type="search"]');
+          if (input) { event.preventDefault(); input.focus(); input.select(); }
+          return;
+        }
+        if (event.key === '?') { event.preventDefault(); setShortcutHelp(true); return; }
+        if (event.key === 'r') {
+          event.preventDefault();
+          refreshStatus();
+          reloadTables();
+          toast('Refreshed', 'ok');
+          return;
+        }
+        if (event.key === 'd') {
+          event.preventDefault();
+          setDensity(adminRoot && adminRoot.dataset.density === 'compact' ? 'comfortable' : 'compact');
+          return;
+        }
+        if (event.key === 'p') {
+          event.preventDefault();
+          if (statusAuto) {
+            statusAuto.checked = !statusAuto.checked;
+            statusAuto.dispatchEvent(new Event('change'));
+          }
+        }
+      }
+    });
+
+    function closeOpenDetail() {
+      const panel = activePanel();
+      const detail = panel && panel.querySelector('.row-detail');
+      if (!detail) return null;
+      const button = detail.previousElementSibling && detail.previousElementSibling.querySelector('[data-select-id]');
+      return button ? function() { button.click(); } : null;
     }
 
   })();
