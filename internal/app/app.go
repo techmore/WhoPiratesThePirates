@@ -90,6 +90,7 @@ func configuredDownloadDir(statePath string) string {
 type AdminPageData struct {
 	state.AdminSettings
 	CatalogSources  []state.CatalogSource
+	CatalogPresets  []CatalogPreset
 	ImportSources   []state.ImportSource
 	ImportRuns      []state.ImportRun
 	ImportManifests []state.ImportManifest
@@ -388,7 +389,7 @@ func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := a.renderPage(w, "admin", "admin.html", AdminPageData{AdminSettings: s, CatalogSources: catalogSources, ImportSources: sources, ImportRuns: runs, ImportManifests: manifests, AuditEntries: audits}); err != nil {
+	if err := a.renderPage(w, "admin", "admin.html", AdminPageData{AdminSettings: s, CatalogSources: catalogSources, CatalogPresets: defaultCatalogPresets(), ImportSources: sources, ImportRuns: runs, ImportManifests: manifests, AuditEntries: audits}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -1317,11 +1318,37 @@ func (a *App) handleAdminImportReferences(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	parsed, err := importer.ParseExternalReference(externalDownloadInput(r))
+	presetID := strings.TrimSpace(r.FormValue("preset_id"))
+	input := externalDownloadInput(r)
+	var preset CatalogPreset
+	if presetID != "" {
+		var ok bool
+		preset, ok = catalogPresetByID(presetID)
+		if !ok {
+			http.Error(w, "unknown catalog preset", http.StatusBadRequest)
+			return
+		}
+		if r.FormValue("approve") != "1" {
+			http.Error(w, "catalog preset approval is required before starting recovery", http.StatusBadRequest)
+			return
+		}
+		if input == "" {
+			input = preset.Magnet
+		}
+		if input == "" {
+			http.Error(w, "selected catalog preset has no configured source; provide an authorized magnet or torrent URL", http.StatusBadRequest)
+			return
+		}
+		_ = a.state.Audit("catalog_preset_approved", fmt.Sprintf("preset=%s name=%s", preset.ID, preset.Name))
+	}
+	parsed, err := importer.ParseExternalReference(input)
 	if err != nil {
 		_ = a.state.Audit("import_reference_rejected", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if presetID != "" && parsed.Name == "" {
+		parsed.Name = preset.Name
 	}
 	item, err := a.state.CreateImportReference(parsed.Kind, parsed.Reference, parsed.InfoHash, parsed.Name, strings.Join(parsed.Trackers, "\n"))
 	if err != nil {

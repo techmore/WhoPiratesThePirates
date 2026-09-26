@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"who-pirates-the-pirates/internal/state"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -269,6 +271,11 @@ func TestAdminAccessIsAvailableWithoutPasswordForLocalMode(t *testing.T) {
 	}
 	if !strings.Contains(pageRec.Body.String(), "Upload and Publish Recovery Catalog") {
 		t.Fatalf("expected upload control in password-free admin page, body=%s", pageRec.Body.String())
+	}
+	for _, marker := range []string{"catalog-preset", "The Pirate Bay &amp; YTS database backup", "Open-source software and Linux distributions", "Approve and Start Recovery"} {
+		if !strings.Contains(pageRec.Body.String(), marker) {
+			t.Fatalf("expected catalog preset workflow marker %q, body=%s", marker, pageRec.Body.String())
+		}
 	}
 
 	statusReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
@@ -2288,6 +2295,90 @@ func TestAdminImportReferenceAcceptsBrowserMultipartForm(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "0D4CD209E72F28023692DFCA65345AA508F9BF7A") {
 		t.Fatalf("expected parsed multipart magnet metadata, got %s", rec.Body.String())
+	}
+}
+
+func TestCatalogPresetApprovalRunsRecoveryWorkflow(t *testing.T) {
+	a, _, _ := newTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	recoveredPath := filepath.Join(t.TempDir(), "preset-source.sqlite")
+	seedCatalog(t, recoveredPath)
+	db, err := sql.Open("sqlite", recoveredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("update torrents set name = 'Preset recovered item'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(t.TempDir(), "aria2c")
+	script := "#!/bin/sh\ndir=''\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --dir=*) dir=\"${arg#--dir=}\" ;;\n  esac\ndone\ncp \"$APP_TEST_PRESET_CATALOG\" \"$dir/preset-source.sqlite\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APP_TEST_PRESET_CATALOG", recoveredPath)
+	a.aria2Path = scriptPath
+
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"preset_id": []string{"pirate-bay-yts-2024-06"},
+		"approve":   []string{"1"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import-references", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preset approval failed: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var item state.ImportReference
+	for {
+		item, err = a.state.ImportReference(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if item.RecoveryStatus == "loaded" {
+			break
+		}
+		if item.RecoveryStatus == "failed" || item.RecoveryError != "" {
+			t.Fatalf("preset recovery failed: %#v", item)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("preset recovery did not finish: %#v", item)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	items, total, err := a.catalogSearchPage("Preset recovered item", "", "", "", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(items) != 1 || items[0].Name != "Preset recovered item" {
+		t.Fatalf("expected preset-loaded catalog to be searchable: total=%d items=%#v", total, items)
+	}
+	audits, err := a.state.AuditEntries(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved := false
+	for _, audit := range audits {
+		if audit.Action == "catalog_preset_approved" && strings.Contains(audit.Details, "pirate-bay-yts-2024-06") {
+			approved = true
+			break
+		}
+	}
+	if !approved {
+		t.Fatalf("expected preset approval audit, got %#v", audits)
 	}
 }
 

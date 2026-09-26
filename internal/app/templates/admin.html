@@ -87,11 +87,20 @@
         {{template "sectiontitle" "Download Magnet"}}
         <span class="status-badge"><span class="status-dot live"></span> aria2c dispatch</span>
       </div>
-      <p class="muted">Paste an operator-authorized magnet or .torrent URL to start aria2c immediately. When the transfer finishes, the app extracts, validates, and loads a compatible SQLite catalog automatically.</p>
+      <p class="muted">Choose a default profile or paste an operator-authorized magnet or .torrent URL. An approved transfer is extracted, validated, indexed, and loaded into search automatically.</p>
       <form id="magnet-download-form" action="/api/admin/import-references" method="post" class="form-section">
+        <label for="catalog-preset">Default catalog profile</label>
+        <select id="catalog-preset" name="preset_id">
+          <option value="">Custom magnet or torrent URL</option>
+          {{range .CatalogPresets}}
+            <option value="{{.ID}}" data-preset-name="{{.Name}}" data-preset-description="{{.Description}}" data-preset-magnet="{{.Magnet}}">{{.Name}}{{if .Magnet}} · source configured{{else}} · source required{{end}}</option>
+          {{end}}
+        </select>
+        <div id="catalog-preset-description" class="muted" role="status">Select a profile to see its recovery requirements.</div>
         <label for="magnet-download-input">Magnet URI or authorized .torrent URL</label>
         <input id="magnet-download-input" name="magnet" required placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent">
-        <button type="submit">
+        <label id="catalog-preset-approval" class="check-label" hidden><input id="catalog-preset-approve" type="checkbox" name="approve" value="1"> I approve this authorized source for recovery and automatic catalog loading.</label>
+        <button id="magnet-download-submit" type="submit">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
           Download
         </button>
@@ -1104,6 +1113,33 @@
           const magnetStatus = document.getElementById('magnet-download-status');
           const magnetList = document.getElementById('magnet-download-list');
           if (magnetForm && magnetStatus && magnetList) {
+            const catalogPreset = document.getElementById('catalog-preset');
+            const catalogPresetDescription = document.getElementById('catalog-preset-description');
+            const catalogPresetApproval = document.getElementById('catalog-preset-approval');
+            const catalogPresetApprove = document.getElementById('catalog-preset-approve');
+            const magnetInput = document.getElementById('magnet-download-input');
+            const magnetSubmit = document.getElementById('magnet-download-submit');
+            const syncCatalogPreset = function() {
+              const option = catalogPreset && catalogPreset.selectedOptions[0];
+              const selected = Boolean(option && option.value);
+              const magnet = selected ? (option.dataset.presetMagnet || '') : '';
+              if (selected && magnet) magnetInput.value = magnet;
+              if (catalogPresetDescription) {
+                catalogPresetDescription.textContent = selected
+                  ? (option.dataset.presetDescription || '') + (magnet ? ' This profile is ready to approve.' : ' This profile needs an authorized magnet or local catalog before approval.')
+                  : 'Select a profile to see its recovery requirements.';
+              }
+              if (catalogPresetApproval) catalogPresetApproval.hidden = !selected;
+              if (catalogPresetApprove) {
+                catalogPresetApprove.required = selected;
+                if (!selected) catalogPresetApprove.checked = false;
+              }
+              if (magnetSubmit) magnetSubmit.textContent = selected ? 'Approve and Start Recovery' : 'Download';
+            };
+            if (catalogPreset) {
+              catalogPreset.addEventListener('change', syncCatalogPreset);
+              syncCatalogPreset();
+            }
             const escapeMagnet = function(value) {
               return String(value).replace(/[&<>"]/g, function(c) {
                 return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
