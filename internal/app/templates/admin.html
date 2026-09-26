@@ -245,6 +245,9 @@ band, section tabs, panels, dense record tables, and status tags.
     }
     .admin-table .truncate { display:block; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .admin-table .stack { display:grid; gap:5px; min-width:220px; }
+    .download-progress { display:grid; gap:4px; min-width:220px; }
+    .download-progress progress { width:100%; height:8px; accent-color:var(--olive-700); }
+    .download-progress-meta { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
     .admin-table input, .admin-table select {
       padding:5px 8px;
       font-size:12.5px;
@@ -574,7 +577,7 @@ band, section tabs, panels, dense record tables, and status tags.
         <div class="table-scroll">
           <table class="admin-table">
             <thead>
-              <tr><th scope="col">Kind</th><th scope="col">Name</th><th scope="col">Reference</th><th scope="col">Destination</th><th scope="col">State</th></tr>
+              <tr><th scope="col">Kind</th><th scope="col">Name</th><th scope="col">Reference</th><th scope="col">Destination</th><th scope="col">Transfer</th><th scope="col">State</th></tr>
             </thead>
             <tbody id="magnet-download-list"></tbody>
           </table>
@@ -1150,6 +1153,32 @@ band, section tabs, panels, dense record tables, and status tags.
       const seconds = Number(value);
       if (!Number.isFinite(seconds) || seconds <= 0) return '—';
       return new Date(seconds * 1000).toLocaleString();
+    }
+
+    function formatBytes(value) {
+      const bytes = Number(value);
+      if (!Number.isFinite(bytes) || bytes < 0) return '—';
+      const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      let amount = bytes;
+      let unit = 0;
+      while (amount >= 1024 && unit < units.length - 1) {
+        amount /= 1024;
+        unit += 1;
+      }
+      const digits = unit === 0 ? 0 : (amount >= 100 ? 0 : 1);
+      return amount.toFixed(digits) + ' ' + units[unit];
+    }
+
+    function formatDuration(value) {
+      let seconds = Math.max(0, Math.floor(Number(value) || 0));
+      if (!seconds) return '—';
+      const hours = Math.floor(seconds / 3600);
+      seconds %= 3600;
+      const minutes = Math.floor(seconds / 60);
+      seconds %= 60;
+      if (hours) return hours + 'h ' + String(minutes).padStart(2, '0') + 'm';
+      if (minutes) return minutes + 'm ' + String(seconds).padStart(2, '0') + 's';
+      return seconds + 's';
     }
 
     function setTag(element, label, tone) {
@@ -1876,7 +1905,7 @@ band, section tabs, panels, dense record tables, and status tags.
         syncPreset();
       }
 
-      const BUSY = ['started', 'running', 'recovering', 'extracting', 'validating', 'loading'];
+      const BUSY = ['starting', 'started', 'running', 'recovering', 'extracting', 'validating', 'loading'];
       function itemTone(item) {
         if (item.downloadError || item.recoveryError || item.downloadStatus === 'error' || item.recoveryStatus === 'failed') return 'error';
         if (BUSY.indexOf(item.downloadStatus) >= 0 || BUSY.indexOf(item.recoveryStatus) >= 0) return 'warn';
@@ -1885,11 +1914,36 @@ band, section tabs, panels, dense record tables, and status tags.
       }
       function itemLabel(item) {
         const download = item.downloadStatus || 'recorded';
-        const parts = [download === 'started' || download === 'running' ? 'in progress' : download];
+        const parts = [download === 'starting' || download === 'started' || download === 'running' ? 'in progress' : download];
         if (item.recoveryStatus) parts.push(item.recoveryStatus);
         const detail = item.downloadError || item.recoveryError;
         if (detail) parts.push(detail);
         return parts.join(' · ');
+      }
+
+      function transferProgress(item) {
+        const downloaded = Number(item.downloadedBytes) || 0;
+        const total = Number(item.totalBytes) || 0;
+        const speed = Number(item.downloadSpeedBytes) || 0;
+        const eta = Number(item.etaSeconds) || 0;
+        let percent = Number(item.downloadProgress);
+        if (!Number.isFinite(percent)) percent = total > 0 ? downloaded / total * 100 : 0;
+        percent = Math.max(0, Math.min(100, percent));
+        const active = ['starting', 'started', 'running'].indexOf(item.downloadStatus) >= 0;
+        const hasMetrics = downloaded > 0 || total > 0 || speed > 0 || percent > 0;
+        if (!hasMetrics) {
+          if (active) return '<span class="muted">Waiting for metadata&hellip;</span>';
+          if (item.downloadStatus === 'completed') return '<span class="muted">Complete</span>';
+          return '<span class="muted">&mdash;</span>';
+        }
+        const size = total > 0 ? formatBytes(downloaded) + ' / ' + formatBytes(total) : formatBytes(downloaded);
+        const details = [size, percent.toFixed(1) + '%'];
+        if (speed > 0) details.push(formatBytes(speed) + '/s');
+        if (eta > 0) details.push('ETA ' + formatDuration(eta));
+        return '<div class="download-progress">' +
+          '<progress max="100" value="' + percent.toFixed(1) + '" aria-label="' + escapeHtml(percent.toFixed(1) + '% downloaded') + '"></progress>' +
+          '<div class="download-progress-meta"><span>' + escapeHtml(details.slice(0, 2).join(' · ')) + '</span><span>' + escapeHtml(details.slice(2).join(' · ')) + '</span></div>' +
+          '</div>';
       }
 
       /* The full set is kept so a filter can re-render instantly, while the
@@ -1920,10 +1974,11 @@ band, section tabs, panels, dense record tables, and status tags.
                 copyButton(item.reference, 'Copy') + '</div></td>' +
                 '<td class="mono muted"><div class="cell-value"><span class="truncate" title="' + escapeHtml(destination) + '">' + escapeHtml(destination || '—') + '</span>' +
                 (destination ? copyButton(destination, 'Copy') : '') + '</div></td>' +
+                '<td>' + transferProgress(item) + '</td>' +
                 '<td><span class="tag ' + (TONES[itemTone(item)] || '') + '">' + escapeHtml(itemLabel(item)) + '</span></td>' +
                 '</tr>';
             }).join('')
-          : '<tr class="row-empty"><td colspan="5">' +
+          : '<tr class="row-empty"><td colspan="6">' +
             (magnetItems.length ? 'No transfers match this filter.' : 'No magnets downloaded yet.') + '</td></tr>';
       }
 
@@ -1943,7 +1998,7 @@ band, section tabs, panels, dense record tables, and status tags.
 
         const failed = items.some(function(item) { return itemTone(item) === 'error'; });
         const recovering = items.some(function(item) { return BUSY.indexOf(item.recoveryStatus) >= 0; });
-        const active = items.some(function(item) { return item.downloadStatus === 'started' || item.downloadStatus === 'running'; });
+        const active = items.some(function(item) { return item.downloadStatus === 'starting' || item.downloadStatus === 'started' || item.downloadStatus === 'running'; });
         const loaded = items.some(function(item) { return item.recoveryStatus === 'loaded'; });
         setStep('download', recovering ? 'Recovering' : (active ? 'In progress' : (failed ? 'Attention' : (loaded ? 'Loaded' : (items.length ? 'Submitted' : 'Ready')))), recovering || active ? 'warn' : (failed ? 'error' : (items.length ? 'ok' : '')));
         if (loaded) {
@@ -1963,6 +2018,13 @@ band, section tabs, panels, dense record tables, and status tags.
             : items.length + ' reference' + (items.length === 1 ? '' : 's') + (same ? '' : ' · updated ' + new Date().toLocaleTimeString());
         }
         if (magnetClientTag) magnetClientTag.textContent = failed ? 'transfer attention' : (recovering || active ? 'transfer running' : 'aria2c dispatch');
+        if (magnetTicker) {
+          const refreshMs = active || recovering ? 2000 : 10000;
+          if (magnetTicker.ms !== refreshMs) {
+            magnetTicker.ms = refreshMs;
+            restartTicker(magnetTicker);
+          }
+        }
       }
 
       magnetForm.addEventListener('submit', async function(event) {

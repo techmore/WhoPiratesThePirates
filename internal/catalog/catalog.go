@@ -246,10 +246,6 @@ func normalizePage(limit, offset int) (int, int) {
 	return limit, offset
 }
 
-func searchQuery(q, category, sortField, sortDir string) (string, []string, []any) {
-	return searchQueryFor(q, category, sortField, sortDir, false)
-}
-
 func searchQueryFor(q, category, sortField, sortDir string, useSearchIndex bool) (string, []string, []any) {
 	orderBy := "t.seeders desc, t.added desc"
 	dir := "asc"

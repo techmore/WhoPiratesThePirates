@@ -83,14 +83,19 @@ type loginAttempt struct {
 }
 
 type downloadStatus struct {
-	Status         string `json:"status"`
-	Started        bool   `json:"started"`
-	PID            int    `json:"pid,omitempty"`
-	Directory      string `json:"directory,omitempty"`
-	Error          string `json:"error,omitempty"`
-	RecoveryStatus string `json:"recoveryStatus,omitempty"`
-	RecoveredPath  string `json:"recoveredPath,omitempty"`
-	RecoveryError  string `json:"recoveryError,omitempty"`
+	Status         string  `json:"status"`
+	Started        bool    `json:"started"`
+	PID            int     `json:"pid,omitempty"`
+	Directory      string  `json:"directory,omitempty"`
+	Error          string  `json:"error,omitempty"`
+	CompletedBytes int64   `json:"downloadedBytes,omitempty"`
+	TotalBytes     int64   `json:"totalBytes,omitempty"`
+	SpeedBytes     int64   `json:"downloadSpeedBytes,omitempty"`
+	ETASeconds     int64   `json:"etaSeconds,omitempty"`
+	Progress       float64 `json:"downloadProgress,omitempty"`
+	RecoveryStatus string  `json:"recoveryStatus,omitempty"`
+	RecoveredPath  string  `json:"recoveredPath,omitempty"`
+	RecoveryError  string  `json:"recoveryError,omitempty"`
 }
 
 func configuredDownloadDir(statePath string) string {
@@ -1455,22 +1460,49 @@ func (a *App) startReferenceDownload(item state.ImportReference) downloadStatus 
 		"--continue=true",
 		"--auto-file-renaming=true",
 		"--allow-overwrite=false",
+		"--summary-interval=1",
+		"--human-readable=false",
+		"--show-console-readout=true",
 		reference,
 	)
-	command.Stdout = logFile
-	command.Stderr = logFile
+	progressWriter := newAria2OutputWriter(logFile, func(progress aria2Progress) {
+		a.setDownloadProgress(id, progress)
+	})
+	command.Stdout = progressWriter
+	command.Stderr = progressWriter
+	a.setDownloadStatus(id, downloadStatus{Status: "starting", Directory: downloadDir, RecoveryStatus: "waiting_for_download"})
 	if err := command.Start(); err != nil {
 		_ = logFile.Close()
 		status := downloadStatus{Status: "not_started", Directory: downloadDir, Error: fmt.Sprintf("start aria2c: %v", err)}
 		a.setDownloadStatus(id, status)
 		return status
 	}
-	status := downloadStatus{Status: "started", Started: true, PID: command.Process.Pid, Directory: downloadDir, RecoveryStatus: "waiting_for_download"}
+	a.downloadMu.RLock()
+	status := a.downloads[id]
+	a.downloadMu.RUnlock()
+	status.Status = "started"
+	status.Started = true
+	status.PID = command.Process.Pid
+	status.Directory = downloadDir
+	status.RecoveryStatus = "waiting_for_download"
 	a.setDownloadStatus(id, status)
 	go func() {
 		err := command.Wait()
+		progressWriter.Flush()
 		_ = logFile.Close()
-		completed := downloadStatus{Status: "completed", Directory: downloadDir}
+		a.downloadMu.RLock()
+		completed := a.downloads[id]
+		a.downloadMu.RUnlock()
+		completed.Status = "completed"
+		completed.Started = false
+		completed.PID = 0
+		completed.Directory = downloadDir
+		if completed.TotalBytes > 0 {
+			completed.CompletedBytes = completed.TotalBytes
+			completed.Progress = 100
+			completed.SpeedBytes = 0
+			completed.ETASeconds = 0
+		}
 		if err != nil {
 			completed.Status = "failed"
 			completed.Error = err.Error()
@@ -1503,8 +1535,21 @@ func (a *App) setDownloadStatus(id int64, status downloadStatus) {
 	a.downloadMu.Lock()
 	a.downloads[id] = status
 	a.downloadMu.Unlock()
-	_ = a.state.UpdateImportReferenceDownload(id, status.Status, status.PID, status.Directory, status.Error)
+	_ = a.state.UpdateImportReferenceDownload(id, status.Status, status.PID, status.Directory, status.Error, status.CompletedBytes, status.TotalBytes, status.SpeedBytes, status.ETASeconds, status.Progress)
 	_ = a.state.UpdateImportReferenceRecovery(id, status.RecoveryStatus, status.RecoveredPath, status.RecoveryError)
+}
+
+func (a *App) setDownloadProgress(id int64, progress aria2Progress) {
+	a.downloadMu.Lock()
+	status := a.downloads[id]
+	status.CompletedBytes = progress.CompletedBytes
+	status.TotalBytes = progress.TotalBytes
+	status.SpeedBytes = progress.SpeedBytes
+	status.ETASeconds = progress.ETASeconds
+	status.Progress = progress.Progress
+	a.downloads[id] = status
+	a.downloadMu.Unlock()
+	_ = a.state.UpdateImportReferenceProgress(id, progress.CompletedBytes, progress.TotalBytes, progress.SpeedBytes, progress.ETASeconds, progress.Progress)
 }
 
 func (a *App) downloadStatus(id int64) (downloadStatus, bool) {
@@ -1519,6 +1564,11 @@ func (a *App) applyDownloadStatus(item *state.ImportReference, status downloadSt
 	item.DownloadPID = status.PID
 	item.DownloadDir = status.Directory
 	item.DownloadError = status.Error
+	item.DownloadCompletedBytes = status.CompletedBytes
+	item.DownloadTotalBytes = status.TotalBytes
+	item.DownloadSpeedBytes = status.SpeedBytes
+	item.DownloadETASeconds = status.ETASeconds
+	item.DownloadProgress = status.Progress
 	item.RecoveryStatus = status.RecoveryStatus
 	item.RecoveredPath = status.RecoveredPath
 	item.RecoveryError = status.RecoveryError

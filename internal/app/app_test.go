@@ -2544,7 +2544,7 @@ func TestAdminImportReferenceStartsConfiguredDownloadClient(t *testing.T) {
 
 	argsPath := filepath.Join(t.TempDir(), "aria2-args.txt")
 	scriptPath := filepath.Join(t.TempDir(), "aria2c")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$APP_TEST_ARIA2_ARGS\"\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$APP_TEST_ARIA2_ARGS\"\nprintf '%s\\n' '[#fake 512B/1024B(50%) CN:1 DL:128B ETA:4s]'\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2593,6 +2593,24 @@ func TestAdminImportReferenceStartsConfiguredDownloadClient(t *testing.T) {
 	}
 	if !strings.Contains(string(args), magnet) || !strings.Contains(string(args), "--dir="+payload.Download.Directory) {
 		t.Fatalf("unexpected download client arguments: %q", string(args))
+	}
+	deadline = time.Now().Add(time.Second)
+	var stored state.ImportReference
+	for {
+		stored, err = a.state.ImportReference(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.DownloadStatus == "completed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("download progress was not persisted: %#v", stored)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if stored.DownloadCompletedBytes != 1024 || stored.DownloadTotalBytes != 1024 || stored.DownloadProgress != 100 {
+		t.Fatalf("unexpected persisted download progress: %#v", stored)
 	}
 }
 
