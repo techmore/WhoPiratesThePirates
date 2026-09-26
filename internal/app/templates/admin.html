@@ -248,6 +248,8 @@ band, section tabs, panels, dense record tables, and status tags.
     .download-progress { display:grid; gap:4px; min-width:220px; }
     .download-progress progress { width:100%; height:8px; accent-color:var(--olive-700); }
     .download-progress-meta { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+    .download-state { display:grid; gap:5px; min-width:220px; }
+    .download-state-detail { color:var(--muted); font-size:11px; line-height:1.35; }
     .admin-table input, .admin-table select {
       padding:5px 8px;
       font-size:12.5px;
@@ -1905,20 +1907,37 @@ band, section tabs, panels, dense record tables, and status tags.
         syncPreset();
       }
 
-      const BUSY = ['starting', 'started', 'running', 'recovering', 'extracting', 'validating', 'loading'];
+      const BUSY = ['starting', 'started', 'running', 'recovering', 'extracting', 'validating', 'validated', 'loading'];
+      const RECOVERY_BUSY = ['recovering', 'extracting', 'validating', 'validated', 'loading'];
+      const RECOVERY_LABELS = {
+        waiting_for_download: 'Waiting for download',
+        recovering: 'Finding catalog',
+        extracting: 'Extracting archive',
+        validating: 'Validating SQLite',
+        validated: 'Validated',
+        loading: 'Loading database',
+        loaded: 'Loaded',
+        failed: 'Recovery failed',
+      };
       function itemTone(item) {
         if (item.downloadError || item.recoveryError || item.downloadStatus === 'error' || item.recoveryStatus === 'failed') return 'error';
-        if (BUSY.indexOf(item.downloadStatus) >= 0 || BUSY.indexOf(item.recoveryStatus) >= 0) return 'warn';
+        if (BUSY.indexOf(item.downloadStatus) >= 0 || item.recoveryStatus === 'waiting_for_download' || RECOVERY_BUSY.indexOf(item.recoveryStatus) >= 0) return 'warn';
         if (item.recoveryStatus === 'loaded') return 'ok';
         return '';
       }
       function itemLabel(item) {
         const download = item.downloadStatus || 'recorded';
         const parts = [download === 'starting' || download === 'started' || download === 'running' ? 'in progress' : download];
-        if (item.recoveryStatus) parts.push(item.recoveryStatus);
-        const detail = item.downloadError || item.recoveryError;
-        if (detail) parts.push(detail);
+        if (item.recoveryStatus) parts.push(RECOVERY_LABELS[item.recoveryStatus] || item.recoveryStatus);
         return parts.join(' · ');
+      }
+      function itemDetail(item) {
+        return item.downloadError || item.recoveryError || item.recoveryDetail || '';
+      }
+      function renderItemState(item) {
+        const detail = itemDetail(item);
+        return '<div class="download-state"><span class="tag ' + (TONES[itemTone(item)] || '') + '">' + escapeHtml(itemLabel(item)) + '</span>' +
+          (detail ? '<span class="download-state-detail">' + escapeHtml(detail) + '</span>' : '') + '</div>';
       }
 
       function transferProgress(item) {
@@ -1958,7 +1977,7 @@ band, section tabs, panels, dense record tables, and status tags.
 
       function magnetMatches(item, q) {
         if (!q) return true;
-        return [item.kind, item.name, item.infoHash, item.reference, item.downloadDir, item.recoveredPath, item.downloadStatus, item.recoveryStatus, item.downloadError, item.recoveryError]
+        return [item.kind, item.name, item.infoHash, item.reference, item.downloadDir, item.recoveredPath, item.downloadStatus, item.recoveryStatus, item.recoveryDetail, item.downloadError, item.recoveryError]
           .some(function(value) { return value && String(value).toLowerCase().indexOf(q) >= 0; });
       }
 
@@ -1975,7 +1994,7 @@ band, section tabs, panels, dense record tables, and status tags.
                 '<td class="mono muted"><div class="cell-value"><span class="truncate" title="' + escapeHtml(destination) + '">' + escapeHtml(destination || '—') + '</span>' +
                 (destination ? copyButton(destination, 'Copy') : '') + '</div></td>' +
                 '<td>' + transferProgress(item) + '</td>' +
-                '<td><span class="tag ' + (TONES[itemTone(item)] || '') + '">' + escapeHtml(itemLabel(item)) + '</span></td>' +
+                '<td>' + renderItemState(item) + '</td>' +
                 '</tr>';
             }).join('')
           : '<tr class="row-empty"><td colspan="6">' +
@@ -1997,16 +2016,20 @@ band, section tabs, panels, dense record tables, and status tags.
         renderMagnets(items.filter(function(item) { return magnetMatches(item, q); }));
 
         const failed = items.some(function(item) { return itemTone(item) === 'error'; });
-        const recovering = items.some(function(item) { return BUSY.indexOf(item.recoveryStatus) >= 0; });
+        const recovering = items.some(function(item) { return RECOVERY_BUSY.indexOf(item.recoveryStatus) >= 0; });
         const active = items.some(function(item) { return item.downloadStatus === 'starting' || item.downloadStatus === 'started' || item.downloadStatus === 'running'; });
+        const activeRecovery = items.find(function(item) { return RECOVERY_BUSY.indexOf(item.recoveryStatus) >= 0; });
         const loaded = items.some(function(item) { return item.recoveryStatus === 'loaded'; });
         setStep('download', recovering ? 'Recovering' : (active ? 'In progress' : (failed ? 'Attention' : (loaded ? 'Loaded' : (items.length ? 'Submitted' : 'Ready')))), recovering || active ? 'warn' : (failed ? 'error' : (items.length ? 'ok' : '')));
         if (loaded) {
           setStep('validate', 'Validated', 'ok');
           setStep('load', 'Loaded', 'ok');
         } else if (recovering) {
-          setStep('validate', 'Processing', 'warn');
-          setStep('load', 'Processing', 'warn');
+          const phase = activeRecovery ? activeRecovery.recoveryStatus : '';
+          const validateLabel = phase === 'extracting' ? 'Extracting' : (phase === 'validating' ? 'Validating' : (phase === 'validated' || phase === 'loading' ? 'Validated' : 'Processing'));
+          const loadLabel = phase === 'loading' ? 'Loading' : (phase === 'validated' ? 'Ready to load' : 'Waiting');
+          setStep('validate', validateLabel, phase === 'validated' || phase === 'loading' ? 'ok' : 'warn');
+          setStep('load', loadLabel, phase === 'loading' ? 'warn' : '');
         } else if (failed) {
           setStep('validate', 'Needs attention', 'error');
           setStep('load', 'Blocked', 'error');

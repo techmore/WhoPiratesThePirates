@@ -47,22 +47,33 @@ func (a *App) recoverReference(id int64, reference, name, preferredDir string) {
 			return
 		}
 	}
+	a.setRecoveryStatus(id, "recovering", "Looking for the completed catalog download.", "", "")
 	artifact, err := a.findReferenceArtifact(name, preferredDir)
-	if err != nil || artifact == "" {
+	if err != nil {
+		a.setRecoveryStatus(id, "recovering", "Waiting for a readable downloaded artifact.", "", err.Error())
+		return
+	}
+	if artifact == "" {
+		a.setRecoveryStatus(id, "recovering", "Waiting for a complete SQLite database or supported archive.", "", "")
 		return
 	}
 
-	a.setRecoveryStatus(id, "extracting", "", "")
+	extractionDetail := fmt.Sprintf("Using downloaded SQLite database %s.", filepath.Base(artifact))
+	if !isCatalogArtifact(artifact) {
+		extractionDetail = fmt.Sprintf("Extracting %s with 7z.", filepath.Base(artifact))
+	}
+	a.setRecoveryStatus(id, "extracting", extractionDetail, artifact, "")
 	candidates, err := a.recoveredCatalogCandidates(id, artifact)
 	if err != nil {
 		a.failRecovery(id, artifact, err)
 		return
 	}
 
-	a.setRecoveryStatus(id, "validating", "", "")
+	a.setRecoveryStatus(id, "validating", fmt.Sprintf("Checking SQLite integrity and schema across %d candidate file(s).", len(candidates)), "", "")
 	var catalogPath string
 	var validationErr error
-	for _, candidate := range candidates {
+	for index, candidate := range candidates {
+		a.setRecoveryStatus(id, "validating", fmt.Sprintf("Validating candidate %d of %d: %s.", index+1, len(candidates), filepath.Base(candidate)), candidate, "")
 		if err := catalog.Validate(candidate); err == nil {
 			catalogPath = candidate
 			break
@@ -77,6 +88,7 @@ func (a *App) recoverReference(id int64, reference, name, preferredDir string) {
 		a.failRecovery(id, artifact, validationErr)
 		return
 	}
+	a.setRecoveryStatus(id, "validated", fmt.Sprintf("SQLite catalog validated: %s. Preparing the live load.", filepath.Base(catalogPath)), catalogPath, "")
 
 	recoveryName := recoveryDisplayName(name, artifact)
 	magnet := ""
@@ -88,26 +100,31 @@ func (a *App) recoverReference(id int64, reference, name, preferredDir string) {
 		return
 	}
 
-	a.setRecoveryStatus(id, "loading", catalogPath, "")
+	a.setRecoveryStatus(id, "loading", "Building the search index and switching the active catalog. This may take a while for large databases.", catalogPath, "")
 	if err := a.replaceCatalogValidated(catalogPath, recoveryName); err != nil {
 		a.failRecovery(id, catalogPath, err)
 		return
 	}
 
-	a.setRecoveryStatus(id, "loaded", catalogPath, "")
+	loadedDetail := "Database loaded and searchable."
+	if stats, statsErr := a.catalogStats(); statsErr == nil {
+		loadedDetail = fmt.Sprintf("Database loaded: %d torrents, %d files, %d categories. Search is ready.", stats.Torrents, stats.Files, stats.Categories)
+	}
+	a.setRecoveryStatus(id, "loaded", loadedDetail, catalogPath, "")
 	_ = a.state.Audit("import_reference_recovery_loaded", fmt.Sprintf("id=%d name=%s path=%s", id, recoveryName, catalogPath))
 }
 
 func (a *App) failRecovery(id int64, artifact string, err error) {
-	a.setRecoveryStatus(id, "failed", artifact, err.Error())
+	a.setRecoveryStatus(id, "failed", "Recovery stopped. Fix the error and retry the catalog load.", artifact, err.Error())
 	_ = a.state.Audit("import_reference_recovery_failed", fmt.Sprintf("id=%d artifact=%s error=%v", id, artifact, err))
 }
 
-func (a *App) setRecoveryStatus(id int64, status, path, recoveryError string) {
-	_ = a.state.UpdateImportReferenceRecovery(id, status, path, recoveryError)
+func (a *App) setRecoveryStatus(id int64, status, detail, path, recoveryError string) {
+	_ = a.state.UpdateImportReferenceRecovery(id, status, detail, path, recoveryError)
 	a.downloadMu.Lock()
 	if current, ok := a.downloads[id]; ok {
 		current.RecoveryStatus = status
+		current.RecoveryDetail = detail
 		current.RecoveredPath = path
 		current.RecoveryError = recoveryError
 		a.downloads[id] = current

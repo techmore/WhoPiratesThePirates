@@ -94,6 +94,7 @@ type downloadStatus struct {
 	ETASeconds     int64   `json:"etaSeconds,omitempty"`
 	Progress       float64 `json:"downloadProgress,omitempty"`
 	RecoveryStatus string  `json:"recoveryStatus,omitempty"`
+	RecoveryDetail string  `json:"recoveryDetail,omitempty"`
 	RecoveredPath  string  `json:"recoveredPath,omitempty"`
 	RecoveryError  string  `json:"recoveryError,omitempty"`
 }
@@ -1433,7 +1434,7 @@ func (a *App) startReferenceDownload(item state.ImportReference) downloadStatus 
 		a.setDownloadStatus(id, status)
 		return status
 	} else if artifact != "" && completedArtifact(artifact) {
-		status := downloadStatus{Status: "reused", Started: true, Directory: downloadDir, RecoveryStatus: "recovering"}
+		status := downloadStatus{Status: "reused", Started: true, Directory: downloadDir, RecoveryStatus: "recovering", RecoveryDetail: "Existing download found; checking the catalog artifact."}
 		a.setDownloadStatus(id, status)
 		go a.recoverReference(id, reference, item.Name, downloadDir)
 		return status
@@ -1470,7 +1471,7 @@ func (a *App) startReferenceDownload(item state.ImportReference) downloadStatus 
 	})
 	command.Stdout = progressWriter
 	command.Stderr = progressWriter
-	a.setDownloadStatus(id, downloadStatus{Status: "starting", Directory: downloadDir, RecoveryStatus: "waiting_for_download"})
+	a.setDownloadStatus(id, downloadStatus{Status: "starting", Directory: downloadDir, RecoveryStatus: "waiting_for_download", RecoveryDetail: "aria2c is resolving metadata and preparing the download."})
 	if err := command.Start(); err != nil {
 		_ = logFile.Close()
 		status := downloadStatus{Status: "not_started", Directory: downloadDir, Error: fmt.Sprintf("start aria2c: %v", err)}
@@ -1485,6 +1486,7 @@ func (a *App) startReferenceDownload(item state.ImportReference) downloadStatus 
 	status.PID = command.Process.Pid
 	status.Directory = downloadDir
 	status.RecoveryStatus = "waiting_for_download"
+	status.RecoveryDetail = "aria2c is downloading the catalog artifact."
 	a.setDownloadStatus(id, status)
 	go func() {
 		err := command.Wait()
@@ -1507,8 +1509,10 @@ func (a *App) startReferenceDownload(item state.ImportReference) downloadStatus 
 			completed.Status = "failed"
 			completed.Error = err.Error()
 			completed.RecoveryStatus = "download_failed"
+			completed.RecoveryDetail = "aria2c stopped before the catalog recovery workflow could begin."
 		} else {
 			completed.RecoveryStatus = "recovering"
+			completed.RecoveryDetail = "Download complete; locating the catalog artifact."
 		}
 		a.setDownloadStatus(id, completed)
 		_ = a.state.Audit("import_reference_download_finished", fmt.Sprintf("id=%d status=%s error=%v", id, completed.Status, err))
@@ -1536,7 +1540,7 @@ func (a *App) setDownloadStatus(id int64, status downloadStatus) {
 	a.downloads[id] = status
 	a.downloadMu.Unlock()
 	_ = a.state.UpdateImportReferenceDownload(id, status.Status, status.PID, status.Directory, status.Error, status.CompletedBytes, status.TotalBytes, status.SpeedBytes, status.ETASeconds, status.Progress)
-	_ = a.state.UpdateImportReferenceRecovery(id, status.RecoveryStatus, status.RecoveredPath, status.RecoveryError)
+	_ = a.state.UpdateImportReferenceRecovery(id, status.RecoveryStatus, status.RecoveryDetail, status.RecoveredPath, status.RecoveryError)
 }
 
 func (a *App) setDownloadProgress(id int64, progress aria2Progress) {
@@ -1570,6 +1574,7 @@ func (a *App) applyDownloadStatus(item *state.ImportReference, status downloadSt
 	item.DownloadETASeconds = status.ETASeconds
 	item.DownloadProgress = status.Progress
 	item.RecoveryStatus = status.RecoveryStatus
+	item.RecoveryDetail = status.RecoveryDetail
 	item.RecoveredPath = status.RecoveredPath
 	item.RecoveryError = status.RecoveryError
 }

@@ -71,6 +71,7 @@ type ImportReference struct {
 	DownloadETASeconds     int64   `json:"etaSeconds,omitempty"`
 	DownloadProgress       float64 `json:"downloadProgress,omitempty"`
 	RecoveryStatus         string  `json:"recoveryStatus,omitempty"`
+	RecoveryDetail         string  `json:"recoveryDetail,omitempty"`
 	RecoveredPath          string  `json:"recoveredPath,omitempty"`
 	RecoveryError          string  `json:"recoveryError,omitempty"`
 }
@@ -129,7 +130,7 @@ func ensureSchema(db *sql.DB) error {
 		`create table if not exists import_sources (id integer primary key autoincrement, name text not null, kind text not null, location text not null, enabled integer not null default 1, created_at integer not null)`,
 		`create table if not exists import_runs (id integer primary key autoincrement, source_id integer not null, status text not null, started_at integer not null, finished_at integer not null default 0, message text not null default '', checksum text not null default '', approved_ref text not null default '', foreign key(source_id) references import_sources(id))`,
 		`create table if not exists import_manifests (id integer primary key autoincrement, name text not null, approved_by text not null, base_dir text not null, checksum text not null, preview_checksum text not null, total_bytes integer not null, created_at integer not null)`,
-		`create table if not exists import_references (id integer primary key autoincrement, kind text not null, reference text not null, info_hash text not null default '', name text not null default '', trackers text not null default '', created_at integer not null, download_status text not null default '', download_pid integer not null default 0, download_dir text not null default '', download_error text not null default '', download_completed_bytes integer not null default 0, download_total_bytes integer not null default 0, download_speed_bytes integer not null default 0, download_eta_seconds integer not null default 0, download_progress real not null default 0, recovery_status text not null default '', recovered_path text not null default '', recovery_error text not null default '')`,
+		`create table if not exists import_references (id integer primary key autoincrement, kind text not null, reference text not null, info_hash text not null default '', name text not null default '', trackers text not null default '', created_at integer not null, download_status text not null default '', download_pid integer not null default 0, download_dir text not null default '', download_error text not null default '', download_completed_bytes integer not null default 0, download_total_bytes integer not null default 0, download_speed_bytes integer not null default 0, download_eta_seconds integer not null default 0, download_progress real not null default 0, recovery_status text not null default '', recovery_detail text not null default '', recovered_path text not null default '', recovery_error text not null default '')`,
 		`create table if not exists catalog_sources (id integer primary key autoincrement, name text not null, magnet text not null default '', catalog_path text not null default '', enabled integer not null default 1, created_at integer not null)`,
 	}
 	for _, stmt := range stmts {
@@ -174,6 +175,7 @@ func ensureImportReferenceColumns(db *sql.DB) error {
 		{name: "download_eta_seconds", definition: "integer not null default 0"},
 		{name: "download_progress", definition: "real not null default 0"},
 		{name: "recovery_status", definition: "text not null default ''"},
+		{name: "recovery_detail", definition: "text not null default ''"},
 		{name: "recovered_path", definition: "text not null default ''"},
 		{name: "recovery_error", definition: "text not null default ''"},
 	}
@@ -538,16 +540,16 @@ func (s *Store) CreateImportReference(kind, reference, infoHash, name, trackers 
 
 func (s *Store) ImportReference(id int64) (ImportReference, error) {
 	var item ImportReference
-	err := s.db.QueryRow(`select id, kind, reference, info_hash, name, trackers, created_at, download_status, download_pid, download_dir, download_error, download_completed_bytes, download_total_bytes, download_speed_bytes, download_eta_seconds, download_progress, recovery_status, recovered_path, recovery_error from import_references where id = ?`, id).Scan(
+	err := s.db.QueryRow(`select id, kind, reference, info_hash, name, trackers, created_at, download_status, download_pid, download_dir, download_error, download_completed_bytes, download_total_bytes, download_speed_bytes, download_eta_seconds, download_progress, recovery_status, recovery_detail, recovered_path, recovery_error from import_references where id = ?`, id).Scan(
 		&item.ID, &item.Kind, &item.Reference, &item.InfoHash, &item.Name, &item.Trackers, &item.CreatedAt,
 		&item.DownloadStatus, &item.DownloadPID, &item.DownloadDir, &item.DownloadError, &item.DownloadCompletedBytes, &item.DownloadTotalBytes, &item.DownloadSpeedBytes, &item.DownloadETASeconds, &item.DownloadProgress,
-		&item.RecoveryStatus, &item.RecoveredPath, &item.RecoveryError,
+		&item.RecoveryStatus, &item.RecoveryDetail, &item.RecoveredPath, &item.RecoveryError,
 	)
 	return item, err
 }
 
 func (s *Store) ImportReferences(limit int) ([]ImportReference, error) {
-	rows, err := s.db.Query(`select id, kind, reference, info_hash, name, trackers, created_at, download_status, download_pid, download_dir, download_error, download_completed_bytes, download_total_bytes, download_speed_bytes, download_eta_seconds, download_progress, recovery_status, recovered_path, recovery_error from import_references order by id desc limit ?`, limit)
+	rows, err := s.db.Query(`select id, kind, reference, info_hash, name, trackers, created_at, download_status, download_pid, download_dir, download_error, download_completed_bytes, download_total_bytes, download_speed_bytes, download_eta_seconds, download_progress, recovery_status, recovery_detail, recovered_path, recovery_error from import_references order by id desc limit ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -558,7 +560,7 @@ func (s *Store) ImportReferences(limit int) ([]ImportReference, error) {
 		if err := rows.Scan(
 			&item.ID, &item.Kind, &item.Reference, &item.InfoHash, &item.Name, &item.Trackers, &item.CreatedAt,
 			&item.DownloadStatus, &item.DownloadPID, &item.DownloadDir, &item.DownloadError, &item.DownloadCompletedBytes, &item.DownloadTotalBytes, &item.DownloadSpeedBytes, &item.DownloadETASeconds, &item.DownloadProgress,
-			&item.RecoveryStatus, &item.RecoveredPath, &item.RecoveryError,
+			&item.RecoveryStatus, &item.RecoveryDetail, &item.RecoveredPath, &item.RecoveryError,
 		); err != nil {
 			return nil, err
 		}
@@ -577,8 +579,8 @@ func (s *Store) UpdateImportReferenceProgress(id int64, completedBytes, totalByt
 	return err
 }
 
-func (s *Store) UpdateImportReferenceRecovery(id int64, status, recoveredPath, recoveryError string) error {
-	_, err := s.db.Exec(`update import_references set recovery_status = ?, recovered_path = ?, recovery_error = ? where id = ?`, status, recoveredPath, recoveryError, id)
+func (s *Store) UpdateImportReferenceRecovery(id int64, status, detail, recoveredPath, recoveryError string) error {
+	_, err := s.db.Exec(`update import_references set recovery_status = ?, recovery_detail = ?, recovered_path = ?, recovery_error = ? where id = ?`, status, detail, recoveredPath, recoveryError, id)
 	return err
 }
 

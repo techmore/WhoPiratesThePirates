@@ -2654,7 +2654,7 @@ func TestImportReferenceRecoversAndLoadsSQLiteCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.RecoveryStatus != "loaded" || stored.RecoveredPath != recoveredPath {
+	if stored.RecoveryStatus != "loaded" || stored.RecoveredPath != recoveredPath || !strings.Contains(stored.RecoveryDetail, "Database loaded") {
 		t.Fatalf("unexpected persisted recovery status: %#v", stored)
 	}
 	sources, err := a.state.CatalogSources()
