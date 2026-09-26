@@ -2,6 +2,7 @@ package importer
 
 import (
 	"fmt"
+	"html"
 	"net/url"
 	"strings"
 )
@@ -17,7 +18,7 @@ type ExternalReference struct {
 }
 
 func ParseExternalReference(raw string) (ExternalReference, error) {
-	raw = strings.TrimSpace(raw)
+	raw = normalizeExternalReference(raw)
 	if raw == "" {
 		return ExternalReference{}, fmt.Errorf("magnet or .torrent URL is required")
 	}
@@ -36,6 +37,22 @@ func ParseExternalReference(raw string) (ExternalReference, error) {
 	default:
 		return ExternalReference{}, fmt.Errorf("reference must be a magnet: or https:// .torrent URL")
 	}
+}
+
+func normalizeExternalReference(raw string) string {
+	raw = html.UnescapeString(strings.TrimSpace(raw))
+	for range 2 {
+		lower := strings.ToLower(raw)
+		if strings.HasPrefix(lower, "magnet:") || strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+			break
+		}
+		decoded, err := url.PathUnescape(raw)
+		if err != nil || decoded == raw {
+			break
+		}
+		raw = html.UnescapeString(strings.TrimSpace(decoded))
+	}
+	return raw
 }
 
 func parseMagnet(raw string, parsed *url.URL) (ExternalReference, error) {

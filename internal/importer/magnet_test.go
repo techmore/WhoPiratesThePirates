@@ -12,6 +12,26 @@ func TestParseExternalReferenceMagnet(t *testing.T) {
 	}
 }
 
+func TestParseExternalReferenceAcceptsRecoveryMagnet(t *testing.T) {
+	ref, err := ParseExternalReference("magnet:?xt=urn:btih:0D4CD209E72F28023692DFCA65345AA508F9BF7A&dn=The%20Pirate%20Bay%20%26amp%3B%20YTS%20-%20Full%20Database%20Backup%20-%202024-06&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Kind != "magnet" || ref.InfoHash != "0D4CD209E72F28023692DFCA65345AA508F9BF7A" || ref.Name == "" || len(ref.Trackers) != 1 {
+		t.Fatalf("unexpected recovery magnet: %#v", ref)
+	}
+}
+
+func TestParseExternalReferenceUnescapesWholeMagnet(t *testing.T) {
+	ref, err := ParseExternalReference("magnet%3A%3Fxt%3Durn%3Abtih%3A0D4CD209E72F28023692DFCA65345AA508F9BF7A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Kind != "magnet" || ref.InfoHash == "" {
+		t.Fatalf("unexpected encoded magnet: %#v", ref)
+	}
+}
+
 func TestParseExternalReferenceTorrentURL(t *testing.T) {
 	ref, err := ParseExternalReference("https://authorized.example/files/ubuntu.torrent")
 	if err != nil {
