@@ -11,6 +11,10 @@ make container-run
 The default container is named `whop2p`, uses the `whop2p-data` volume, and
 publishes host port `18081` to container port `8080`.
 
+The image includes `aria2c` for authorized magnet and `.torrent` downloads and
+`7z` for extracting supported catalog archives. Rebuild the image after
+changing the container definition.
+
 ```sh
 make container-stop
 container start whop2p

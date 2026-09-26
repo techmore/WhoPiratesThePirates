@@ -2,7 +2,8 @@
 #   make container-build
 FROM alpine:3.22
 
-RUN addgroup -S whop2p \
+RUN apk add --no-cache aria2 p7zip \
+    && addgroup -S whop2p \
     && adduser -S -G whop2p -h /var/lib/whop2p whop2p \
     && mkdir -p /var/lib/whop2p \
     && chown -R whop2p:whop2p /var/lib/whop2p

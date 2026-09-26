@@ -5,7 +5,7 @@
 FROM geerlingguy/docker-ubuntu2204-ansible:latest
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates \
+    && apt-get install --no-install-recommends -y aria2 ca-certificates p7zip-full \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --user-group --home-dir /var/lib/who-pirates-the-pirates --shell /usr/sbin/nologin who-pirates-the-pirates \
     && install -d -m 0750 -o who-pirates-the-pirates -g who-pirates-the-pirates /var/lib/who-pirates-the-pirates

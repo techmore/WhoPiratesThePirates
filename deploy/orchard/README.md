@@ -25,6 +25,8 @@ container build -f deploy/orchard/Containerfile -t who-pirates-the-pirates:local
 The base image includes an init system because Apple container machines boot
 `/sbin/init`. The application is installed as a `systemd` service inside the
 machine. The image installs `whop2p` and a `who-pirates-the-pirates` symlink.
+It also installs `aria2c` for authorized magnet and `.torrent` downloads and
+`7z` for extracting supported catalog archives.
 
 ## Create a machine
 
