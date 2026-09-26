@@ -119,6 +119,47 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// resetOrder lists the operational tables in the order they must be emptied:
+// import_runs carries a foreign key to import_sources, so it has to go first.
+// The catalog database is a separate, read-only file and is never touched, and
+// neither is the settings table, which holds the Tor configuration and the
+// admin session epoch.
+var resetOrder = []string{
+	"import_references",
+	"import_manifests",
+	"import_runs",
+	"import_sources",
+	"catalog_sources",
+	"admin_audit",
+}
+
+// ResetOperationalRecords empties every operational record table in one
+// transaction and reports how many rows each one held, so the caller can tell
+// the operator exactly what was discarded. The audit log is cleared too, but
+// the caller re-records the reset afterwards, leaving one honest trace.
+func (s *Store) ResetOperationalRecords() (map[string]int64, error) {
+	counts := make(map[string]int64, len(resetOrder))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, table := range resetOrder {
+		var count int64
+		if err := tx.QueryRow(`select count(*) from ` + table).Scan(&count); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`delete from ` + table); err != nil {
+			return nil, err
+		}
+		counts[table] = count
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
 func (s *Store) Healthy() error {
 	return s.db.Ping()
 }
