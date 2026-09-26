@@ -7,7 +7,7 @@ import (
 )
 
 // ExternalReference is metadata parsed from an operator-supplied magnet or
-// torrent URL. It never fetches the URL or contacts a tracker.
+// torrent URL. Callers decide whether an authorized reference is downloaded.
 type ExternalReference struct {
 	Kind      string   `json:"kind"`
 	Reference string   `json:"reference"`
