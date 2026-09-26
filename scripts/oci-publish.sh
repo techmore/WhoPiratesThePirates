@@ -15,7 +15,7 @@ command -v container >/dev/null || {
   exit 1
 }
 
-make -C "$root" build >/dev/null
+make -C "$root" linux-arm64 >/dev/null
 image_ref="$registry/$image:$tag"
 container build -f "$root/deploy/orchard/Containerfile" -t "$image_ref" "$root"
 container push "$image_ref"

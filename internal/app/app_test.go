@@ -2039,6 +2039,162 @@ func TestAdminImportSourceDetailEndpointReturnsItem(t *testing.T) {
 	}
 }
 
+// The admin panel posts some requests with fetch + FormData, which sends
+// multipart/form-data. Request.ParseForm alone ignores that encoding, so these
+// tests cover the multipart path for the endpoints the panel drives from
+// JavaScript.
+func TestAdminPanelMultipartFormPostsAreAccepted(t *testing.T) {
+	a, statePath := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	seedState(t, statePath)
+	cookieVal, err := a.signSession("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(t *testing.T, path string, fields map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		for key, value := range fields {
+			if err := writer.WriteField(key, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, path, &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.AddCookie(&http.Cookie{Name: "admin_session", Value: cookieVal})
+		rec := httptest.NewRecorder()
+		a.Router().ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("import source update", func(t *testing.T) {
+		if rec := post(t, "/api/admin/import-sources", map[string]string{"name": "Multipart source", "kind": "file", "location": "/tmp/m.json", "enabled": "1"}); rec.Code != http.StatusOK && rec.Code != http.StatusSeeOther {
+			t.Fatalf("unexpected create code: %d body=%s", rec.Code, rec.Body.String())
+		}
+		sources, err := a.state.ImportSources()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sources) == 0 {
+			t.Fatal("expected the multipart create to persist a source")
+		}
+		id := sources[0].ID
+		rec := post(t, "/api/admin/import-sources/update", map[string]string{
+			"id":       strconv.FormatInt(id, 10),
+			"name":     "Renamed by multipart",
+			"kind":     "https",
+			"location": "https://example.com/renamed",
+		})
+		if rec.Code != http.StatusOK && rec.Code != http.StatusSeeOther {
+			t.Fatalf("unexpected update code: %d body=%s", rec.Code, rec.Body.String())
+		}
+		updated, err := a.state.ImportSource(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Name != "Renamed by multipart" || updated.Location != "https://example.com/renamed" || updated.Kind != "https" {
+			t.Fatalf("multipart update did not apply: %#v", updated)
+		}
+		if rec := post(t, "/api/admin/import-sources/delete", map[string]string{"id": strconv.FormatInt(id, 10)}); rec.Code != http.StatusOK {
+			t.Fatalf("unexpected multipart delete code: %d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("audit delete", func(t *testing.T) {
+		if err := a.state.Audit("multipart_probe", "seeded"); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := a.state.AuditEntries(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := post(t, "/api/admin/audits/delete", map[string]string{"id": strconv.FormatInt(entries[0].ID, 10)})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("unexpected multipart audit delete code: %d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("manifest preview", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "one.txt"), []byte("first"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rec := post(t, "/api/admin/import-manifest/preview", map[string]string{
+			"name":        "Multipart manifest",
+			"approved_by": "owner@example.com",
+			"base_dir":    dir,
+			"files":       "one.txt",
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("unexpected multipart preview code: %d body=%s", rec.Code, rec.Body.String())
+		}
+		var payload struct {
+			Manifest struct {
+				Name            string   `json:"name"`
+				Files           []string `json:"files"`
+				PreviewChecksum string   `json:"previewChecksum"`
+			} `json:"manifest"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Manifest.Name != "Multipart manifest" || len(payload.Manifest.Files) != 1 || payload.Manifest.PreviewChecksum == "" {
+			t.Fatalf("expected the multipart preview to resolve one file, got %#v", payload)
+		}
+	})
+
+	t.Run("manifest record", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "two.txt"), []byte("second"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rec := post(t, "/api/admin/import-manifest/record", map[string]string{
+			"name":         "Recorded multipart manifest",
+			"approved_by":  "owner@example.com",
+			"base_dir":     dir,
+			"files":        "two.txt",
+			"source_id":    "1",
+			"status":       "queued",
+			"approved_ref": "owner@example.com",
+		})
+		if rec.Code != http.StatusOK && rec.Code != http.StatusSeeOther {
+			t.Fatalf("unexpected multipart record code: %d body=%s", rec.Code, rec.Body.String())
+		}
+		manifests, err := a.state.ImportManifests(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(manifests) == 0 || manifests[0].Name != "Recorded multipart manifest" {
+			t.Fatalf("expected the multipart record to persist a manifest, got %#v", manifests)
+		}
+	})
+
+	t.Run("tor settings", func(t *testing.T) {
+		rec := post(t, "/api/admin/tor", map[string]string{
+			"tor_mode":         "dual",
+			"tor_enabled":      "1",
+			"onion_address":    "example.onion",
+			"tor_control_addr": "127.0.0.1:9051",
+		})
+		if rec.Code != http.StatusSeeOther && rec.Code != http.StatusOK {
+			t.Fatalf("unexpected multipart tor code: %d body=%s", rec.Code, rec.Body.String())
+		}
+		settings, err := a.state.GetAdminSettings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settings.TorMode != "dual" || !settings.TorEnabled {
+			t.Fatalf("multipart tor update did not apply: %#v", settings)
+		}
+	})
+}
+
 func TestAdminDeleteImportSourceEndpointDeletesItem(t *testing.T) {
 	a, statePath := newAdminTestApp(t, testAdminPassword)
 	defer a.Close()

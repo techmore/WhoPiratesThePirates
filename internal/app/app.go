@@ -57,6 +57,19 @@ const maxRequestBodyBytes int64 = 1 << 20
 const maxCatalogUploadBytes int64 = 4 << 30
 const maxCatalogUploadMemoryBytes = 32 << 20
 
+// parseAdminForm populates r.Form for both encodings a browser can send.
+// Request.ParseForm only understands application/x-www-form-urlencoded, so a
+// fetch call that posts FormData (which is multipart/form-data) would otherwise
+// leave every r.FormValue lookup empty. Callers must use this instead of
+// ParseForm so an admin request works whether the form was submitted natively
+// or posted from the panel.
+func parseAdminForm(r *http.Request) error {
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		return r.ParseMultipartForm(maxRequestBodyBytes)
+	}
+	return r.ParseForm()
+}
+
 const (
 	maxLoginFailures       = 5
 	loginWindow            = 15 * time.Minute
@@ -415,7 +428,9 @@ func loadEmbeddedTemplates(releaseVersion string) (map[string]*template.Template
 	loaded := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
 		builder := template.New(page).Funcs(templateFuncs(releaseVersion))
-		tpl, err := builder.ParseFS(templateFS, "templates/"+page, "templates/base.html")
+		// base.html is parsed first so a page can override shared hooks such as
+		// "head" with its own scoped styles.
+		tpl, err := builder.ParseFS(templateFS, "templates/base.html", "templates/"+page)
 		if err != nil {
 			return nil, err
 		}
@@ -434,7 +449,8 @@ func (a *App) renderPage(w http.ResponseWriter, name, page string, data any) err
 	}
 
 	builder := template.New(name).Funcs(templateFuncs(a.version))
-	tpl, err := builder.ParseFiles(templatePath(page), templatePath("base.html"))
+	// base.html first: page templates may override shared hooks such as "head".
+	tpl, err := builder.ParseFiles(templatePath("base.html"), templatePath(page))
 	if err != nil {
 		return err
 	}
@@ -551,7 +567,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -708,11 +724,17 @@ func (a *App) handleAdminImportRunsList(w http.ResponseWriter, r *http.Request) 
 	if hasMore {
 		runs = runs[:limit]
 	}
+	total, err := a.state.ImportRunsCount(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"items":   runs,
 		"limit":   limit,
 		"offset":  offset,
 		"q":       q,
+		"total":   total,
 		"hasMore": hasMore,
 		"nextOffset": func() int {
 			if hasMore {
@@ -771,7 +793,7 @@ func (a *App) handleAdminDeleteImportRun(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -810,11 +832,17 @@ func (a *App) handleAdminImportManifestsList(w http.ResponseWriter, r *http.Requ
 	if hasMore {
 		manifests = manifests[:limit]
 	}
+	total, err := a.state.ImportManifestsCount(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"items":   manifests,
 		"limit":   limit,
 		"offset":  offset,
 		"q":       q,
+		"total":   total,
 		"hasMore": hasMore,
 		"nextOffset": func() int {
 			if hasMore {
@@ -848,7 +876,7 @@ func (a *App) handleAdminDeleteImportManifest(w http.ResponseWriter, r *http.Req
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -917,11 +945,17 @@ func (a *App) handleAdminAudits(w http.ResponseWriter, r *http.Request) {
 	if hasMore {
 		audits = audits[:limit]
 	}
+	total, err := a.state.AuditEntriesCount(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"items":   audits,
 		"limit":   limit,
 		"offset":  offset,
 		"q":       q,
+		"total":   total,
 		"hasMore": hasMore,
 		"nextLimit": func() int {
 			if hasMore {
@@ -961,7 +995,7 @@ func (a *App) handleAdminDeleteAuditEntry(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1015,7 +1049,7 @@ func (a *App) handleAdminExportAudits(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAdminImportSources(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
-		if err := r.ParseForm(); err != nil {
+		if err := parseAdminForm(r); err != nil {
 			http.Error(w, "invalid form", http.StatusBadRequest)
 			return
 		}
@@ -1058,11 +1092,17 @@ func (a *App) handleAdminImportSourcesList(w http.ResponseWriter, r *http.Reques
 	if hasMore {
 		sources = sources[:limit]
 	}
+	total, err := a.state.ImportSourcesCount(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{
 		"items":   sources,
 		"limit":   limit,
 		"offset":  offset,
 		"q":       q,
+		"total":   total,
 		"hasMore": hasMore,
 		"nextOffset": func() int {
 			if hasMore {
@@ -1121,7 +1161,7 @@ func (a *App) handleAdminToggleImportSource(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1144,7 +1184,7 @@ func (a *App) handleAdminUpdateImportSource(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1173,7 +1213,7 @@ func (a *App) handleAdminDeleteImportSource(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1204,7 +1244,7 @@ func (a *App) handleAdminCreateImportRun(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1233,7 +1273,7 @@ func (a *App) handleAdminFinishImportRun(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1308,13 +1348,7 @@ func (a *App) handleAdminImportReferences(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var err error
-	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
-		err = r.ParseMultipartForm(maxRequestBodyBytes)
-	} else {
-		err = r.ParseForm()
-	}
-	if err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1666,7 +1700,7 @@ func (a *App) handleAdminUpdateCatalogSource(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1693,7 +1727,7 @@ func (a *App) handleAdminToggleCatalogSource(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1716,7 +1750,7 @@ func (a *App) handleAdminDeleteCatalogSource(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1747,7 +1781,7 @@ func (a *App) handleAdminLoadCatalogSource(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1821,7 +1855,7 @@ func parseCatalogSourceForm(r *http.Request) (string, string, string, bool, erro
 	if r.Method != http.MethodPost {
 		return "", "", "", false, fmt.Errorf("method not allowed")
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		return "", "", "", false, fmt.Errorf("invalid form")
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
@@ -1854,7 +1888,7 @@ func (a *App) handleAdminRecordValidatedManifest(w http.ResponseWriter, r *http.
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
@@ -1912,7 +1946,7 @@ func (a *App) validateManifestRequest(r *http.Request) (importer.ValidationResul
 	if r.Method != http.MethodPost {
 		return importer.ValidationResult{}, "", fmt.Errorf("method not allowed")
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		return importer.ValidationResult{}, "", fmt.Errorf("invalid form")
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
@@ -1940,7 +1974,7 @@ func (a *App) handleAdminTorUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if err := parseAdminForm(r); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}

@@ -352,3 +352,135 @@ func TestBumpAdminSessionEpochIsAtomic(t *testing.T) {
 		t.Fatalf("expected %d atomic bumps, got %d", bumps, settings.AdminSessionEpoch)
 	}
 }
+
+// The admin console renders "1-10 of N" ranges from the count queries, so a
+// count that filters differently from the page it describes would quietly lie
+// to the operator. Assert the two stay in step for every searchable table.
+func TestRecordCountsMatchFilteredPages(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	sources := []struct {
+		name, kind, location string
+		enabled              bool
+	}{
+		{"Main index mirror", "https", "https://example.com/feed.json", true},
+		{"Local dataset drop", "file", "/srv/authorized/dataset.json", false},
+		{"Backup mirror", "https", "https://example.org/backup.json", true},
+	}
+	for _, source := range sources {
+		if err := st.CreateImportSource(source.name, source.kind, source.location, source.enabled); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runs := []struct {
+		status, message, ref string
+	}{
+		{"succeeded", "Imported 4,201 records", "owner@example.com"},
+		{"failed", "checksum mismatch", "owner@example.com"},
+		{"queued", "awaiting operator approval", "ops@example.com"},
+	}
+	for _, run := range runs {
+		if err := st.CreateImportRun(1, run.status, run.message, "", run.ref); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	manifests := []struct {
+		name, approvedBy, baseDir string
+	}{
+		{"Authorized dataset 2024-06", "owner@example.com", "."},
+		{"Archive mirror dataset", "ops@example.org", "/srv/authorized"},
+	}
+	for _, manifest := range manifests {
+		if err := st.CreateImportManifest(manifest.name, manifest.approvedBy, manifest.baseDir, "sha256:aa", "sha256:aa", 2048); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	audits := []struct{ action, details string }{
+		{"import_source_create", "name=Main index mirror"},
+		{"import_source_toggle", "id=1 enabled=false"},
+		{"import_run_finish", "id=1 status=succeeded"},
+	}
+	for _, entry := range audits {
+		if err := st.Audit(entry.action, entry.details); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := []struct {
+		label   string
+		queries []string
+		count   func(string) (int64, error)
+		page    func(string, int, int) (int, error)
+	}{
+		{
+			label:   "import sources",
+			queries: []string{"", "example.com", "Backup", "file", "nothing-matches-this"},
+			count:   st.ImportSourcesCount,
+			page: func(q string, limit, offset int) (int, error) {
+				items, err := st.ImportSourcesSearchOffset(q, limit, offset)
+				return len(items), err
+			},
+		},
+		{
+			label:   "import runs",
+			queries: []string{"", "succeeded", "checksum", "example.com", "nothing-matches-this"},
+			count:   st.ImportRunsCount,
+			page: func(q string, limit, offset int) (int, error) {
+				items, err := st.ImportRunsSearchOffset(q, limit, offset)
+				return len(items), err
+			},
+		},
+		{
+			label:   "import manifests",
+			queries: []string{"", "2024-06", "ops@example.org", "/srv", "nothing-matches-this"},
+			count:   st.ImportManifestsCount,
+			page: func(q string, limit, offset int) (int, error) {
+				items, err := st.ImportManifestsSearchOffset(q, limit, offset)
+				return len(items), err
+			},
+		},
+		{
+			label:   "audit entries",
+			queries: []string{"", "import_run_finish", "checksum", "id=1", "nothing-matches-this"},
+			count:   st.AuditEntriesCount,
+			page: func(q string, limit, offset int) (int, error) {
+				items, err := st.AuditEntriesSearchOffset(q, limit, offset)
+				return len(items), err
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			for _, q := range tc.queries {
+				total, err := tc.count(q)
+				if err != nil {
+					t.Fatalf("count(%q): %v", q, err)
+				}
+				// Walk the whole result set a page at a time; the rows handed to
+				// the operator must add up to exactly what the count reported.
+				seen := 0
+				for offset := 0; ; offset += 2 {
+					page, err := tc.page(q, 2, offset)
+					if err != nil {
+						t.Fatalf("page(%q, offset=%d): %v", q, offset, err)
+					}
+					seen += page
+					if page < 2 {
+						break
+					}
+				}
+				if seen != int(total) {
+					t.Fatalf("query %q: paged rows %d disagree with count %d", q, seen, total)
+				}
+			}
+		})
+	}
+}

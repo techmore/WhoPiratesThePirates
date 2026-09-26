@@ -242,6 +242,30 @@ func (s *Store) BumpAdminSessionEpoch() (int64, error) {
 	return epoch, err
 }
 
+// likeFilter builds the shared "where" fragment used by the admin record tables.
+// The paged reads and their matching count queries both call it, so a filter can
+// never cover one query and silently not the other.
+func likeFilter(columns []string, q string) (string, []any) {
+	if strings.TrimSpace(q) == "" {
+		return "", nil
+	}
+	clauses := make([]string, 0, len(columns))
+	args := make([]any, 0, len(columns))
+	for _, column := range columns {
+		clauses = append(clauses, column+` like '%' || ? || '%'`)
+		args = append(args, q)
+	}
+	return " where " + strings.Join(clauses, " or "), args
+}
+
+// countRows reports how many rows match the same filter the paged reads use, so
+// the admin console can render honest "1-10 of 42" ranges.
+func (s *Store) countRows(table, where string, args []any) (int64, error) {
+	var count int64
+	err := s.db.QueryRow(`select count(*) from `+table+where, args...).Scan(&count)
+	return count, err
+}
+
 func (s *Store) Audit(action, details string) error {
 	_, err := s.db.Exec(`insert into admin_audit(action, created_at, details) values(?, ?, ?)`, action, time.Now().Unix(), details)
 	return err
@@ -256,13 +280,8 @@ func (s *Store) AuditEntriesOffset(limit, offset int) ([]AuditEntry, error) {
 }
 
 func (s *Store) AuditEntriesSearchOffset(q string, limit, offset int) ([]AuditEntry, error) {
-	sqlText := `select id, action, created_at, details from admin_audit`
-	var args []any
-	if strings.TrimSpace(q) != "" {
-		sqlText += ` where action like '%' || ? || '%' or details like '%' || ? || '%'`
-		args = append(args, q, q)
-	}
-	sqlText += ` order by id desc limit ? offset ?`
+	where, args := likeFilter([]string{"action", "details"}, q)
+	sqlText := `select id, action, created_at, details from admin_audit` + where + ` order by id desc limit ? offset ?`
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(sqlText, args...)
 	if err != nil {
@@ -278,6 +297,12 @@ func (s *Store) AuditEntriesSearchOffset(q string, limit, offset int) ([]AuditEn
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// AuditEntriesCount returns the number of audit rows matching q.
+func (s *Store) AuditEntriesCount(q string) (int64, error) {
+	where, args := likeFilter([]string{"action", "details"}, q)
+	return s.countRows("admin_audit", where, args)
 }
 
 func (s *Store) AuditEntry(id int64) (AuditEntry, error) {
@@ -320,13 +345,8 @@ func (s *Store) ImportSourcesOffset(limit, offset int) ([]ImportSource, error) {
 }
 
 func (s *Store) ImportSourcesSearchOffset(q string, limit, offset int) ([]ImportSource, error) {
-	sqlText := `select id, name, kind, location, enabled, created_at from import_sources`
-	var args []any
-	if strings.TrimSpace(q) != "" {
-		sqlText += ` where name like '%' || ? || '%' or kind like '%' || ? || '%' or location like '%' || ? || '%'`
-		args = append(args, q, q, q)
-	}
-	sqlText += ` order by id desc limit ? offset ?`
+	where, args := likeFilter([]string{"name", "kind", "location"}, q)
+	sqlText := `select id, name, kind, location, enabled, created_at from import_sources` + where + ` order by id desc limit ? offset ?`
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(sqlText, args...)
 	if err != nil {
@@ -344,6 +364,12 @@ func (s *Store) ImportSourcesSearchOffset(q string, limit, offset int) ([]Import
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// ImportSourcesCount returns the number of import sources matching q.
+func (s *Store) ImportSourcesCount(q string) (int64, error) {
+	where, args := likeFilter([]string{"name", "kind", "location"}, q)
+	return s.countRows("import_sources", where, args)
 }
 
 func (s *Store) ImportSource(id int64) (ImportSource, error) {
@@ -441,13 +467,8 @@ func (s *Store) ImportManifestsOffset(limit, offset int) ([]ImportManifest, erro
 }
 
 func (s *Store) ImportManifestsSearchOffset(q string, limit, offset int) ([]ImportManifest, error) {
-	sqlText := `select id, name, approved_by, base_dir, checksum, preview_checksum, total_bytes, created_at from import_manifests`
-	var args []any
-	if strings.TrimSpace(q) != "" {
-		sqlText += ` where name like '%' || ? || '%' or approved_by like '%' || ? || '%' or base_dir like '%' || ? || '%'`
-		args = append(args, q, q, q)
-	}
-	sqlText += ` order by id desc limit ? offset ?`
+	where, args := likeFilter([]string{"name", "approved_by", "base_dir"}, q)
+	sqlText := `select id, name, approved_by, base_dir, checksum, preview_checksum, total_bytes, created_at from import_manifests` + where + ` order by id desc limit ? offset ?`
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(sqlText, args...)
 	if err != nil {
@@ -463,6 +484,12 @@ func (s *Store) ImportManifestsSearchOffset(q string, limit, offset int) ([]Impo
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// ImportManifestsCount returns the number of stored manifests matching q.
+func (s *Store) ImportManifestsCount(q string) (int64, error) {
+	where, args := likeFilter([]string{"name", "approved_by", "base_dir"}, q)
+	return s.countRows("import_manifests", where, args)
 }
 
 func (s *Store) ImportManifest(id int64) (ImportManifest, error) {
@@ -720,13 +747,8 @@ func (s *Store) ImportRunsOffset(limit, offset int) ([]ImportRun, error) {
 }
 
 func (s *Store) ImportRunsSearchOffset(q string, limit, offset int) ([]ImportRun, error) {
-	sqlText := `select id, source_id, status, started_at, finished_at, message, checksum, approved_ref from import_runs`
-	var args []any
-	if strings.TrimSpace(q) != "" {
-		sqlText += ` where status like '%' || ? || '%' or message like '%' || ? || '%' or approved_ref like '%' || ? || '%'`
-		args = append(args, q, q, q)
-	}
-	sqlText += ` order by id desc limit ? offset ?`
+	where, args := likeFilter([]string{"status", "message", "approved_ref"}, q)
+	sqlText := `select id, source_id, status, started_at, finished_at, message, checksum, approved_ref from import_runs` + where + ` order by id desc limit ? offset ?`
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(sqlText, args...)
 	if err != nil {
@@ -742,6 +764,12 @@ func (s *Store) ImportRunsSearchOffset(q string, limit, offset int) ([]ImportRun
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// ImportRunsCount returns the number of import runs matching q.
+func (s *Store) ImportRunsCount(q string) (int64, error) {
+	where, args := likeFilter([]string{"status", "message", "approved_ref"}, q)
+	return s.countRows("import_runs", where, args)
 }
 
 func (s *Store) ImportRun(id int64) (ImportRun, error) {

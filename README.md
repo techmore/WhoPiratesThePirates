@@ -39,6 +39,51 @@ backup through `whop2p load-catalog` or `APP_DB_PATH`.
 
 ## Install
 
+### Default macOS deployment: Apple Container + Orchard
+
+The preferred macOS deployment is a persistent Apple `container machine`
+managed by Orchard. The machine provides an isolated Linux environment with
+systemd, persistent storage, logs, and resource indicators.
+
+```sh
+brew install --cask orchard
+# Install Apple's container CLI separately if needed.
+
+make orchard-create
+```
+
+The machine is named `whop2p` and appears in Orchard's Machines view. Open it
+with:
+
+```sh
+make orchard-shell
+```
+
+Transfer an authorized catalog backup into or out of the machine:
+
+```sh
+./scripts/orchard-transfer.sh import ~/Downloads/catalog.sqlite
+./scripts/orchard-transfer.sh export ~/Downloads/catalog-export.sqlite
+```
+
+The transfer helper validates the SQLite file and transfers catalog data only.
+It does not download content or contact trackers. Stop the native Homebrew
+service before using the machine against the same port and catalog.
+
+### Optional native macOS service
+
+```sh
+brew install techmore/tap/whop2p
+whop2p --version
+whop2p setup
+whop2p load-catalog /path/to/catalog.sqlite
+brew services start whop2p
+whop2p open
+```
+
+Use either the native service or the Orchard machine, not both against the same
+catalog and port.
+
 ### macOS with Homebrew
 
 ```sh

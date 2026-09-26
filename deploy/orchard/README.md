@@ -1,7 +1,10 @@
 # Orchard / Apple container machine deployment
 
-This is the richer macOS path. It uses Apple's native `container` runtime and can
-be managed from the Orchard GUI. It does not use Docker.
+This is the default macOS deployment path. It uses Apple's native `container`
+runtime and can be managed from the Orchard GUI. It does not use Docker.
+
+The native `launchd` deployment remains available as an optional lightweight
+alternative in `deploy/macos`.
 
 Requirements:
 
@@ -49,6 +52,20 @@ Orchard, or through a private network agent/reverse proxy.
 The example environment listens on the machine's private network. If the machine
 is reachable beyond the Mac, use Tailscale, WireGuard, SSH, or a TLS reverse
 proxy. Do not expose the admin surface on an untrusted network.
+
+## Catalog transfer
+
+Use the transfer helper to move an authorized SQLite catalog backup into or out
+of the machine:
+
+```sh
+./scripts/orchard-transfer.sh import ~/Downloads/catalog.sqlite
+./scripts/orchard-transfer.sh export ~/Downloads/catalog-export.sqlite
+```
+
+The helper validates the file before transfer and does not download content or
+contact trackers. The service listens on the machine's private IP; Apple
+container machines do not provide normal host port forwarding.
 
 ## Backups and lifecycle
 

@@ -10,12 +10,19 @@ RUN apt-get update \
     && useradd --system --user-group --home-dir /var/lib/who-pirates-the-pirates --shell /usr/sbin/nologin who-pirates-the-pirates \
     && install -d -m 0750 -o who-pirates-the-pirates -g who-pirates-the-pirates /var/lib/who-pirates-the-pirates
 
-COPY bin/whop2p /usr/local/bin/whop2p
+COPY bin/whop2p-linux-arm64 /usr/local/bin/whop2p
 COPY deploy/orchard/who-pirates-the-pirates.service /etc/systemd/system/who-pirates-the-pirates.service
 COPY deploy/orchard/who-pirates-the-pirates.env.example /etc/who-pirates-the-pirates.env.example
 
 RUN chmod 0755 /usr/local/bin/whop2p \
     && ln -sf whop2p /usr/local/bin/who-pirates-the-pirates \
+    && WHOP2P_HOME=/var/lib/who-pirates-the-pirates /usr/local/bin/whop2p setup \
+    && cp /var/lib/who-pirates-the-pirates/service.env /etc/who-pirates-the-pirates.env \
+    && sed -i 's/^APP_BIND_ADDR=.*/APP_BIND_ADDR=0.0.0.0/' /etc/who-pirates-the-pirates.env \
+    && printf '\nAPP_ALLOW_INSECURE_HTTP=true\n' >> /etc/who-pirates-the-pirates.env \
+    && chown -R who-pirates-the-pirates:who-pirates-the-pirates /var/lib/who-pirates-the-pirates \
+    && chown root:who-pirates-the-pirates /etc/who-pirates-the-pirates.env \
+    && chmod 0640 /etc/who-pirates-the-pirates.env \
     && systemctl enable who-pirates-the-pirates.service
 
 ENTRYPOINT ["/sbin/init"]

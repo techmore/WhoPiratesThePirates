@@ -1,1212 +1,1832 @@
 {{define "title"}}Admin{{end}}
+
+{{/*
+Admin console styles. base.html owns the shared design system (tokens, cards,
+typography, tables, buttons); this block only adds the console layer: header
+band, section tabs, panels, dense record tables, and status tags.
+*/}}
+{{define "head"}}
+  <style>
+    /* Nested surfaces are flat, so skip the shared backdrop blur inside the
+       console. It is expensive to paint and the panels already stack. */
+    .admin .card,
+    .admin .field,
+    .admin input,
+    .admin select,
+    .admin textarea,
+    .admin button,
+    .admin .admin-table,
+    .admin .meta-row,
+    .admin .step,
+    .admin .callout { backdrop-filter:none; }
+    .admin { display:grid; gap:14px; padding-bottom:2rem; }
+    .admin :focus-visible { outline:2px solid var(--olive-700); outline-offset:2px; }
+
+    /* Header band */
+    .admin-head { display:grid; gap:16px; padding:20px 22px 22px; }
+    .admin-head-top {
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:16px;
+      flex-wrap:wrap;
+    }
+    .admin-head h1 { margin:4px 0 0; font-size:clamp(30px, 4vw, 44px); line-height:1; }
+    .admin-head .lede { margin:8px 0 0; max-width:64ch; color:var(--muted); }
+    .admin-head-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .admin-stats { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:8px; }
+    .admin-stats .stat {
+      padding:10px 12px;
+      border:1px solid var(--line-soft);
+      border-radius:10px;
+      background:rgba(247, 248, 244, .72);
+    }
+    .admin-stats .stat .v {
+      font-size:20px;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+
+    /* Section tabs */
+    .admin-tabs {
+      position:sticky;
+      top:0;
+      z-index:30;
+      display:flex;
+      gap:4px;
+      flex-wrap:wrap;
+      padding:6px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      background:rgba(238, 240, 230, .94);
+      backdrop-filter:blur(14px);
+      box-shadow:var(--shadow);
+    }
+    .admin-tabs a {
+      display:inline-flex;
+      align-items:center;
+      gap:7px;
+      padding:7px 13px;
+      border:1px solid transparent;
+      border-radius:999px;
+      color:var(--muted);
+      font-size:13px;
+      font-weight:700;
+      white-space:nowrap;
+      transition:background .15s ease, border-color .15s ease, color .15s ease;
+    }
+    .admin-tabs a:hover { border-color:var(--line); background:rgba(247, 248, 244, .78); color:var(--text); }
+    .admin-tabs a[aria-current="true"] {
+      background:var(--olive-700);
+      border-color:var(--olive-800);
+      color:var(--olive-50);
+    }
+    .admin-tabs .tab-count {
+      min-width:20px;
+      padding:1px 6px;
+      border-radius:999px;
+      background:rgba(110, 117, 75, .14);
+      color:var(--olive-900);
+      font-size:11px;
+      font-variant-numeric:tabular-nums;
+      text-align:center;
+    }
+    .admin-tabs a[aria-current="true"] .tab-count { background:rgba(247, 248, 244, .22); color:var(--olive-50); }
+
+    /* Panels */
+    .admin-panels { display:grid; gap:14px; }
+    .admin-panel { padding:18px 20px 20px; scroll-margin-top:78px; }
+    .admin-panel[hidden] { display:none !important; }
+    .panel { margin-top:18px; padding-top:16px; border-top:1px solid var(--line-soft); }
+    .panel:first-child { margin-top:0; padding-top:0; border-top:0; }
+    .panel-head {
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      margin-bottom:10px;
+    }
+    .panel-head h2 { margin:4px 0 0; font-size:23px; line-height:1.08; }
+    .panel-head h3 { margin:4px 0 0; font-size:18px; line-height:1.15; }
+    .panel-note { margin:0; max-width:80ch; color:var(--muted); font-size:13px; }
+
+    /* Forms */
+    .field-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px 12px; }
+    .field-grid-3 { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px 12px; }
+    .field { display:grid; gap:5px; min-width:0; }
+    .field.span-all { grid-column:1 / -1; }
+    .field > label, .field-label { margin:0; }
+    .field span.hint { font-size:12px; line-height:1.35; color:var(--muted); }
+    .switch { display:flex; align-items:center; gap:8px; margin:0; color:var(--text); font-size:13px; }
+    .form-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+    .form-actions input, .form-actions select { width:auto; }
+    .result-line { margin-top:10px; font-size:13px; color:var(--muted); }
+    .result-line.is-error { color:#8a3229; }
+    .result-line.is-ok { color:#315948; }
+
+    /* Workflow stepper */
+    .steps { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; }
+    .step {
+      display:grid;
+      grid-template-columns:auto minmax(0, 1fr);
+      align-items:start;
+      gap:8px 10px;
+      padding:12px 13px;
+      border:1px solid var(--line-soft);
+      border-radius:12px;
+      background:rgba(247, 248, 244, .58);
+      transition:transform .15s ease, border-color .15s ease, background .15s ease;
+    }
+    .step:hover { transform:translateY(-1px); border-color:var(--olive-600); background:rgba(247, 248, 244, .88); }
+    .step-num {
+      display:grid;
+      place-items:center;
+      width:26px;
+      height:26px;
+      border-radius:50%;
+      background:var(--olive-900);
+      color:var(--olive-50);
+      font-size:11px;
+      font-weight:800;
+    }
+    .step strong { display:block; font-size:14px; line-height:1.2; }
+    .step p { margin:2px 0 0; color:var(--muted); font-size:12px; line-height:1.35; }
+    .step-foot { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .step-foot a { font-size:12px; font-weight:700; }
+
+    /* Status tags */
+    .tag {
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:3px 9px;
+      border-radius:999px;
+      background:rgba(110, 117, 75, .12);
+      color:var(--olive-900);
+      font-size:10.5px;
+      font-weight:800;
+      letter-spacing:.09em;
+      text-transform:uppercase;
+      white-space:nowrap;
+    }
+    .tag.is-ok { background:rgba(62, 122, 88, .16); color:#2c5c41; }
+    .tag.is-warn { background:rgba(176, 125, 42, .2); color:#7a531a; }
+    .tag.is-error { background:rgba(150, 55, 45, .14); color:#8a3229; }
+    .tag.is-muted { background:rgba(120, 113, 108, .12); color:var(--stone-600); }
+    .tag-row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+
+    /* Callout */
+    .callout {
+      display:flex;
+      align-items:flex-start;
+      gap:10px;
+      margin-top:12px;
+      padding:11px 13px;
+      border-left:3px solid var(--warm);
+      border-radius:0 10px 10px 0;
+      background:rgba(176, 125, 42, .09);
+      color:var(--muted);
+      font-size:13px;
+    }
+    .callout strong { color:var(--text); white-space:nowrap; }
+
+    /* Key/value rows */
+    .meta-list { display:grid; gap:6px; }
+    .meta-row {
+      display:flex;
+      align-items:baseline;
+      justify-content:space-between;
+      gap:12px;
+      padding:7px 10px;
+      border:1px solid var(--line-soft);
+      border-radius:10px;
+      background:rgba(247, 248, 244, .72);
+      font-size:13px;
+    }
+    .meta-row > span:first-child { color:var(--muted); }
+
+    /* Record tables */
+    .table-scroll {
+      overflow-x:auto;
+      border:1px solid var(--line-soft);
+      border-radius:var(--radius-sm);
+      background:var(--surface-strong);
+    }
+    .admin-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .admin-table thead th {
+      position:sticky;
+      top:0;
+      z-index:1;
+      text-align:left;
+      white-space:nowrap;
+      padding:8px 10px;
+      background:var(--olive-100);
+      color:var(--muted);
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+    }
+    .admin-table td { padding:8px 10px; border-top:1px solid var(--line-soft); vertical-align:middle; }
+    .admin-table tbody tr:hover { background:rgba(110, 117, 75, .06); }
+    .admin-table tbody tr[aria-selected="true"] { background:rgba(110, 117, 75, .1); }
+    .admin-table .cell-id { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .admin-table .cell-num { font-variant-numeric:tabular-nums; text-align:right; }
+    .admin-table .nowrap { white-space:nowrap; }
+    .admin-table .mono {
+      font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size:11.5px;
+      word-break:break-all;
+    }
+    .admin-table .truncate { display:block; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .admin-table .stack { display:grid; gap:5px; min-width:220px; }
+    .admin-table input, .admin-table select {
+      padding:5px 8px;
+      font-size:12.5px;
+      border-radius:8px;
+      background:var(--panel-2);
+    }
+    .admin-table .cell-actions { white-space:nowrap; }
+    .admin-table .cell-actions form { display:inline-flex; gap:6px; flex-wrap:wrap; }
+    .btn-sm { padding:4px 9px; font-size:12px; font-weight:700; border-radius:8px; }
+    .btn-quiet { background:rgba(247, 248, 244, .78); }
+    .row-select {
+      all:unset;
+      cursor:pointer;
+      display:block;
+      font-weight:700;
+      font-size:13px;
+    }
+    .row-select:hover { text-decoration:underline; }
+    .row-empty td { padding:20px 12px; text-align:center; color:var(--muted); }
+    .row-detail > td { background:rgba(110, 117, 75, .05); }
+    .row-detail pre {
+      margin:0;
+      max-height:260px;
+      overflow:auto;
+      font-size:12px;
+      line-height:1.45;
+      color:var(--muted);
+      white-space:pre-wrap;
+      word-break:break-word;
+    }
+
+    /* Table toolbar and pager */
+    .table-bar {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-bottom:8px;
+    }
+    .table-bar-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .table-bar input[type="search"] { width:200px; padding:6px 12px; font-size:13px; border-radius:999px; }
+    .table-bar .btn-sm { display:inline-flex; align-items:center; }
+    .pager { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:8px; }
+    .pager .muted { font-size:12.5px; }
+    .downloads-refresh { font-size:12px; color:var(--muted); }
+
+    /* Toasts: one feedback channel for every mutation, so an operator never
+       has to read a status line to find out whether a save landed. */
+    .toasts {
+      position:fixed;
+      right:18px;
+      bottom:18px;
+      z-index:120;
+      display:grid;
+      gap:8px;
+      width:min(360px, calc(100vw - 36px));
+      pointer-events:none;
+    }
+    .toast {
+      display:grid;
+      grid-template-columns:auto minmax(0, 1fr) auto;
+      align-items:start;
+      gap:8px 10px;
+      padding:11px 12px;
+      border:1px solid var(--line);
+      border-left:3px solid var(--olive-700);
+      border-radius:12px;
+      background:var(--surface-strong);
+      box-shadow:0 16px 34px -20px rgba(31, 33, 23, .7);
+      font-size:13px;
+      pointer-events:auto;
+      animation:toast-in .18s ease-out;
+    }
+    .toast.is-ok { border-left-color:#3e7a58; }
+    .toast.is-warn { border-left-color:var(--warm); }
+    .toast.is-error { border-left-color:#96372d; }
+    .toast p { margin:0; color:var(--text); overflow-wrap:anywhere; }
+    .toast small { display:block; margin-top:2px; color:var(--muted); }
+    .toast button {
+      all:unset;
+      cursor:pointer;
+      padding:0 4px;
+      color:var(--muted);
+      font-size:15px;
+      line-height:1.2;
+    }
+    .toast button:hover { color:var(--text); }
+    @keyframes toast-in { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+    @media (prefers-reduced-motion: reduce) { .toast { animation:none; } }
+
+    /* Copy affordance for the long opaque values operators paste elsewhere. */
+    .copy {
+      all:unset;
+      cursor:pointer;
+      display:inline-flex;
+      align-items:center;
+      gap:4px;
+      padding:1px 7px;
+      border:1px solid var(--line-soft);
+      border-radius:999px;
+      color:var(--muted);
+      font-size:10.5px;
+      font-weight:800;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      white-space:nowrap;
+    }
+    .copy:hover { border-color:var(--olive-600); color:var(--olive-900); background:rgba(110, 117, 75, .08); }
+    .cell-value { display:flex; align-items:center; gap:6px; min-width:0; }
+    .cell-value .truncate { min-width:0; }
+
+    /* Compact density for the record tables, for long operator sessions. */
+    .admin[data-density="compact"] .admin-table td { padding:4px 8px; }
+    .admin[data-density="compact"] .admin-table input,
+    .admin[data-density="compact"] .admin-table select { padding:3px 7px; font-size:12px; }
+    .admin[data-density="compact"] .admin-table .stack { gap:3px; min-width:180px; }
+    .admin[data-density="compact"] .step { padding:9px 11px; }
+
+    /* Rows an operator is editing are held steady by the refresh ticker, and
+       say so, so a paused table never looks broken. */
+    .row-busy td { opacity:.72; }
+    .ticker-paused {
+      display:inline-flex;
+      align-items:center;
+      gap:5px;
+      color:var(--warm);
+      font-size:11.5px;
+    }
+
+    /* Keyboard shortcut help */
+    .shortcut-help {
+      position:fixed;
+      inset:0;
+      z-index:130;
+      display:grid;
+      place-items:center;
+      padding:20px;
+      background:rgba(31, 33, 23, .42);
+    }
+    .shortcut-help[hidden] { display:none; }
+    .shortcut-card {
+      width:min(460px, 100%);
+      max-height:80vh;
+      overflow:auto;
+      padding:20px 22px;
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:var(--surface-strong);
+      box-shadow:0 24px 60px -28px rgba(31, 33, 23, .8);
+    }
+    .shortcut-card h2 { margin:4px 0 12px; font-size:20px; }
+    .shortcut-list { display:grid; gap:2px; margin:0; }
+    .shortcut-row {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:14px;
+      padding:7px 0;
+      border-top:1px solid var(--line-soft);
+      font-size:13px;
+    }
+    .shortcut-row:first-child { border-top:0; }
+    kbd {
+      padding:2px 7px;
+      border:1px solid var(--line);
+      border-bottom-width:2px;
+      border-radius:6px;
+      background:rgba(247, 248, 244, .9);
+      font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size:11.5px;
+      font-weight:700;
+      color:var(--text);
+      white-space:nowrap;
+    }
+    .is-busy { opacity:.6; pointer-events:none; }
+
+    @media (max-width: 900px) {
+      .admin-stats { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+      .steps { grid-template-columns:1fr; }
+      .field-grid-3 { grid-template-columns:1fr; }
+    }
+    @media (max-width: 700px) {
+      .admin-panel { padding:16px 14px 18px; }
+      .admin-head { padding:16px 14px 18px; }
+      .field-grid { grid-template-columns:1fr; }
+      .admin-tabs { border-radius:16px; }
+      .table-bar input[type="search"] { width:100%; }
+    }
+  </style>
+{{end}}
+
 {{define "body"}}
-  <div class="card admin-section" id="admin-overview">
-      {{template "panelhead" (dict "Eyebrow" "Operational panel" "Title" "Admin" "Subtitle" "Download, validate, and load an authorized recovery catalog." "ActionHref" "/" "ActionLabel" "Back to catalog")}}
-      <div class="admin-hero">
-        <div class="admin-hero-copy">
-          <div class="section-eyebrow" style="color:var(--olive-300);">Recovery operations</div>
-          <h2>Bring a backup online</h2>
-          <p>Start a trusted magnet transfer, confirm the recovered SQLite file, then switch catalog searches to the loaded database.</p>
-          <div class="admin-hero-actions">
-            <a class="pill active" href="#recovery-workflow">Start recovery workflow</a>
-            <a class="pill" href="#catalog-source-admin">Manage catalog sources</a>
-          </div>
-        </div>
-        <div class="admin-hero-grid" aria-label="Recovery system status">
-          <div class="admin-hero-stat"><span>Transfer</span><strong id="admin-transfer-state">Checking…</strong><small>aria2c client</small></div>
-          <div class="admin-hero-stat"><span>Catalog</span><strong id="admin-catalog-state">Checking…</strong><small>active search database</small></div>
-          <div class="admin-hero-stat"><span>Sources</span><strong id="admin-source-state">Checking…</strong><small>customer recovery links</small></div>
-        </div>
+<div class="admin" id="admin-root" data-density="comfortable">
+  <div class="toasts" id="toasts" role="status" aria-live="polite" aria-label="Notifications"></div>
+  <div class="shortcut-help" id="shortcut-help" hidden role="dialog" aria-modal="true" aria-labelledby="shortcut-help-title">
+    <div class="shortcut-card">
+      <h2 id="shortcut-help-title">Keyboard shortcuts</h2>
+      <div class="shortcut-list">
+        <div class="shortcut-row"><span>Switch section</span><span><kbd>1</kbd>–<kbd>6</kbd></span></div>
+        <div class="shortcut-row"><span>Filter the current table</span><kbd>/</kbd></div>
+        <div class="shortcut-row"><span>Refresh status and tables</span><kbd>r</kbd></div>
+        <div class="shortcut-row"><span>Toggle compact density</span><kbd>d</kbd></div>
+        <div class="shortcut-row"><span>Pause or resume auto-refresh</span><kbd>p</kbd></div>
+        <div class="shortcut-row"><span>Close this panel</span><kbd>Esc</kbd></div>
       </div>
-      <nav class="admin-nav" aria-label="Admin sections">
-        <a href="#recovery-workflow">01 Workflow</a>
-        <a href="#magnet-download">02 Download</a>
-        <a href="#catalog-source-admin">03 Catalog</a>
-        <a href="#admin-settings">Settings</a>
-        <a href="#import-state">Imports</a>
-        <a href="#audit-log">Audit</a>
-      </nav>
-      <div class="statusline">
-        <div class="stat"><div class="k">Tor enabled</div><div class="v">{{if .TorEnabled}}Yes{{else}}No{{end}}</div></div>
-        <div class="stat"><div class="k">Tor mode</div><div class="v">{{.TorMode}}</div></div>
-        <div class="stat"><div class="k">Status</div><div class="v">{{.TorStatus}}</div></div>
+      <div class="form-actions"><button type="button" class="btn-sm btn-quiet" id="shortcut-help-close">Close</button></div>
+    </div>
+  </div>
+  <header class="card admin-head">
+    <div class="admin-head-top">
+      <div>
+        <div class="muted section-eyebrow">Operational panel</div>
+        <h1>Admin</h1>
+        <p class="lede">Download, validate, and load an authorized recovery catalog. Settings live in app state; the catalog database stays read-only.</p>
       </div>
-      <div class="card" style="margin-top:18px;padding:18px;">
-        <div class="panel-head" style="margin-bottom:12px;">
-          <div>
-            <div class="muted section-eyebrow">Admin Status API</div>
-            <h2 class="section-title section-title-small" style="margin:0;">Live summary</h2>
-            <div class="muted">Refreshes from <code>/api/admin/status</code> without leaving the page.</div>
-          </div>
-          <div class="toolbar">
-            <label class="check-label" style="display:flex;align-items:center;gap:8px;margin:0 8px 0 0;">
-              <input type="checkbox" id="status-auto" checked>
-              Auto-refresh
-            </label>
-            <button type="button" id="status-refresh" class="button-secondary" style="width:auto;">Refresh</button>
-          </div>
-        </div>
-        <div class="stats" id="status-stats"></div>
-        <div id="status-meta" class="muted" style="margin-top:10px;"></div>
-        <div id="status-session" class="muted" style="margin-top:6px;"></div>
-        <div id="status-login" class="muted" style="margin-top:6px;"></div>
-        <div id="status-logout" class="muted" style="margin-top:6px;"></div>
-        <div id="status-health" class="side-list" style="margin-top:10px;"></div>
+      <div class="admin-head-actions">
+        <label class="switch"><input type="checkbox" id="status-auto" checked> Auto-refresh</label>
+        <button type="button" id="status-refresh" class="button-secondary">Refresh status</button>
+        <button type="button" id="density-toggle" class="button-secondary" aria-pressed="false">Compact rows</button>
+        <button type="button" id="shortcut-help-open" class="button-secondary" aria-haspopup="dialog">Shortcuts <kbd>?</kbd></button>
+        <a class="button-secondary" href="/">Back to catalog</a>
       </div>
     </div>
-    <div class="card admin-section workflow-panel" id="recovery-workflow">
+    <div class="admin-stats" id="status-stats">
+      <div class="stat"><div class="k">Transfer client</div><div class="v" id="admin-transfer-state">Checking</div></div>
+      <div class="stat"><div class="k">Active catalog</div><div class="v" id="admin-catalog-state">Checking</div></div>
+      <div class="stat"><div class="k">Recovery sources</div><div class="v" id="admin-source-state">Checking</div></div>
+      <div class="stat"><div class="k">Tor mode</div><div class="v">{{if .TorMode}}{{.TorMode}}{{else}}off{{end}}</div></div>
+      <div class="stat"><div class="k">Import sources</div><div class="v">{{len .ImportSources}}</div></div>
+      <div class="stat"><div class="k">Import runs</div><div class="v">{{len .ImportRuns}}</div></div>
+      <div class="stat"><div class="k">Manifests</div><div class="v">{{len .ImportManifests}}</div></div>
+      <div class="stat"><div class="k">Audit rows</div><div class="v">{{len .AuditEntries}}</div></div>
+    </div>
+    <div class="meta-list">
+      <div class="meta-row"><span>Catalog</span><span class="muted" id="status-meta">Waiting for the first status refresh.</span></div>
+      <div class="meta-row"><span>Health</span><span class="tag-row" id="status-health"></span></div>
+      <div class="meta-row"><span>Admin session epoch</span><span class="muted" id="status-session"></span></div>
+      <div class="meta-row"><span>Last login audit</span><span class="muted" id="status-login"></span></div>
+      <div class="meta-row"><span>Last logout audit</span><span class="muted" id="status-logout"></span></div>
+    </div>
+  </header>
+
+  <nav class="admin-tabs" aria-label="Admin sections">
+    <a href="#recovery-workflow" data-tab="recovery-workflow">Recovery</a>
+    <a href="#catalog-source-admin" data-tab="catalog-source-admin">Catalog</a>
+    <a href="#import-state" data-tab="import-state">Imports</a>
+    <a href="#manifest-tools" data-tab="manifest-tools">Manifests</a>
+    <a href="#audit-log" data-tab="audit-log">Audit</a>
+    <a href="#admin-settings" data-tab="admin-settings">Settings</a>
+  </nav>
+
+  <div class="admin-panels">
+
+    {{/* ---------------------------------------------------------- Recovery */}}
+    <section class="card admin-panel" id="recovery-workflow" data-panel="recovery-workflow" aria-label="Recovery workflow">
       <div class="panel-head">
         <div>
           <div class="muted section-eyebrow">Recovery workflow</div>
-          <h2 class="section-title section-title-small" style="margin:0;">Download → validate → load</h2>
-          <div class="muted">Each step leaves the previous artifact in place so the recovery path is easy to inspect and repeat.</div>
+          <h2>Download &rarr; validate &rarr; load</h2>
+          <p class="panel-note">Each step leaves the previous artifact in place, so the recovery path stays inspectable and repeatable.</p>
         </div>
-        <span class="status-badge"><span class="status-dot live"></span> Operator runbook</span>
+        <span class="tag is-ok">Operator runbook</span>
       </div>
-      <div class="workflow-grid">
-        <a class="workflow-step" href="#magnet-download">
-          <span class="workflow-step-number">01</span>
-          <span><strong>Download the archive</strong><p>Paste a magnet or authorized torrent URL and let aria2c save it locally.</p></span>
-          <span id="workflow-download-state" class="workflow-state">Ready</span>
+      <div class="steps">
+        <a class="step" href="#magnet-download">
+          <span class="step-num">01</span>
+          <span><strong>Download the archive</strong><p>Paste a magnet or an authorized torrent URL and let aria2c save it locally.</p></span>
+          <span class="step-foot"><span class="tag" id="workflow-download-state">Ready</span><span>Open step</span></span>
         </a>
-        <a class="workflow-step" href="#catalog-source-admin">
-          <span class="workflow-step-number">02</span>
+        <a class="step" href="#catalog-source-admin">
+          <span class="step-num">02</span>
           <span><strong>Validate the database</strong><p>Register the SQLite path or upload a backup, then verify its schema.</p></span>
-          <span id="workflow-validate-state" class="workflow-state">Awaiting file</span>
+          <span class="step-foot"><span class="tag" id="workflow-validate-state">Awaiting file</span><span>Open step</span></span>
         </a>
-        <a class="workflow-step" href="#catalog-load-form">
-          <span class="workflow-step-number">03</span>
+        <a class="step" href="#catalog-load-form">
+          <span class="step-num">03</span>
           <span><strong>Load and refresh search</strong><p>Load the approved source to make the recovered catalog searchable.</p></span>
-          <span id="workflow-load-state" class="workflow-state">Ready when validated</span>
+          <span class="step-foot"><span class="tag" id="workflow-load-state">Ready when validated</span><span>Open step</span></span>
         </a>
       </div>
-      <div class="workflow-note"><strong>Operator path</strong><span>When the transfer finishes, extract the archive until you have a local <code>.sqlite</code> or <code>.db</code> file, then use the Catalog step below. The customer dropdown only shows sources explicitly marked enabled.</span></div>
-    </div>
-    <div class="card" id="magnet-download">
-      <div class="section-heading">
-        {{template "sectiontitle" "Download Magnet"}}
-        <span class="status-badge"><span class="status-dot live"></span> aria2c dispatch</span>
-      </div>
-      <p class="muted">Choose a default profile or paste an operator-authorized magnet or .torrent URL. An approved transfer is extracted, validated, indexed, and loaded into search automatically.</p>
-      <form id="magnet-download-form" action="/api/admin/import-references" method="post" class="form-section">
-        <label for="catalog-preset">Default catalog profile</label>
-        <select id="catalog-preset" name="preset_id">
-          <option value="">Custom magnet or torrent URL</option>
-          {{range .CatalogPresets}}
-            <option value="{{.ID}}" data-preset-name="{{.Name}}" data-preset-description="{{.Description}}" data-preset-magnet="{{.Magnet}}">{{.Name}}{{if .Magnet}} · source configured{{else}} · source required{{end}}</option>
-          {{end}}
-        </select>
-        <div id="catalog-preset-description" class="muted" role="status">Select a profile to see its recovery requirements.</div>
-        <label for="magnet-download-input">Magnet URI or authorized .torrent URL</label>
-        <input id="magnet-download-input" name="magnet" required placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent">
-        <label id="catalog-preset-approval" class="check-label" hidden><input id="catalog-preset-approve" type="checkbox" name="approve" value="1"> I approve this authorized source for recovery and automatic catalog loading.</label>
-        <button id="magnet-download-submit" type="submit">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-          Download
-        </button>
-        <div id="magnet-download-status" class="muted" role="status" aria-live="polite"></div>
-      </form>
-      <div id="magnet-download-list" class="side-list" style="margin-top:12px;"></div>
-    </div>
-    <div class="card admin-section" id="catalog-source-admin">
-      <div class="section-heading">
-        {{template "sectiontitle" "Catalog Recovery Sources"}}
-        <span class="status-badge"><span class="status-dot warn"></span> Validate before load</span>
-      </div>
-      <p class="muted">Upload an authorized SQLite backup, attach the customer download magnet, and optionally load the validated database immediately. The app stores the backup read-only; an approved torrent client must seed the matching magnet.</p>
-      <div class="card" style="margin-top:14px;padding:16px;background:var(--surface-strong);">
-        <div class="panel-head" style="margin-bottom:10px;">
+      <div class="callout"><strong>Operator path</strong><span>When the transfer finishes, extract the archive until you have a local <code>.sqlite</code> or <code>.db</code> file, then use the Catalog tab. The customer-facing dropdown only lists sources explicitly marked visible.</span></div>
+
+      <div class="panel" id="magnet-download">
+        <div class="panel-head">
           <div>
-            <div class="muted section-eyebrow">Upload and publish</div>
-            <h3 class="section-title section-title-small" style="margin:0;">Add a recovery database file</h3>
+            <h3>Download a magnet</h3>
+            <p class="panel-note">Choose a default profile or paste an operator-authorized magnet or <code>.torrent</code> URL. An approved transfer is extracted, validated, indexed, and loaded into search automatically.</p>
           </div>
+          <span class="tag" id="magnet-client-tag">aria2c dispatch</span>
         </div>
-        <form method="post" action="/api/admin/catalog-sources/upload" enctype="multipart/form-data" class="form-section">
-          <div class="form-grid">
-            <div>
-              <label for="catalog-upload-name">Display name</label>
-              <input id="catalog-upload-name" name="name" required placeholder="Primary recovery catalog">
-            </div>
-            <div>
-              <label for="catalog-upload-magnet">Customer magnet link</label>
-              <input id="catalog-upload-magnet" name="magnet" required placeholder="magnet:?xt=urn:btih:...">
-            </div>
-          </div>
-          <label for="catalog-upload-file">SQLite catalog backup</label>
-          <input id="catalog-upload-file" name="catalog_file" type="file" accept=".sqlite,.db,application/x-sqlite3" required>
-          <label class="check-label"><input type="checkbox" name="enabled" checked> Show magnet in the customer recovery dropdown</label>
-          <label class="check-label"><input type="checkbox" name="load_now" checked> Validate and load this database immediately</label>
-          <button type="submit">Upload and Publish Recovery Catalog</button>
-        </form>
-      </div>
-      <div class="subsection-label">Use a local file</div>
-      <div class="muted">Already have the database on this machine? Register its path below instead of uploading a second copy.</div>
-      <form method="post" action="/api/admin/catalog-sources" class="form-section">
-        <div class="form-grid">
-          <div>
-            <label>Name</label>
-            <input name="name" required placeholder="Primary recovery catalog">
-          </div>
-          <div>
-            <label>Magnet link</label>
-            <input name="magnet" placeholder="magnet:?xt=urn:btih:...">
-          </div>
-        </div>
-        <label>Local SQLite database path (optional)</label>
-        <input name="catalog_path" placeholder="/path/to/recovered/catalog.sqlite">
-        <label class="check-label"><input type="checkbox" name="enabled" checked> Show magnet in the customer recovery dropdown</label>
-        <label class="check-label"><input type="checkbox" name="load_now" checked> Validate and load immediately when a local database path is provided</label>
-        <button type="submit">Register Recovery Source</button>
-      </form>
-      <div class="subsection-label">Load into search</div>
-      <form id="catalog-load-form" method="post" action="/api/admin/catalog-sources/load" class="form-section" style="margin-top:0;border-top:1px solid var(--line-soft);padding-top:18px;">
-        <div class="form-grid">
-          <div>
-            <label for="catalog-load-source">Load configured database</label>
-            <select id="catalog-load-source" name="source_id">
-              <option value="">Use a direct path below</option>
-              {{range .CatalogSources}}<option value="{{.ID}}">{{.Name}}{{if .CatalogPath}} · local path configured{{else}} · magnet only{{end}}</option>{{end}}
+        <form id="magnet-download-form" action="/api/admin/import-references" method="post" class="field-grid-3">
+          <div class="field">
+            <label for="catalog-preset">Default catalog profile</label>
+            <select id="catalog-preset" name="preset_id">
+              <option value="">Custom magnet or torrent URL</option>
+              {{range .CatalogPresets}}
+                <option value="{{.ID}}" data-preset-name="{{.Name}}" data-preset-description="{{.Description}}" data-preset-magnet="{{.Magnet}}">{{.Name}}{{if .Magnet}} &middot; source configured{{else}} &middot; source required{{end}}</option>
+              {{end}}
             </select>
           </div>
+          <div class="field">
+            <label for="magnet-download-input">Magnet URI or authorized <code>.torrent</code> URL</label>
+            <input id="magnet-download-input" name="magnet" required placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent">
+          </div>
+          <div class="field">
+            <span class="hint" id="catalog-preset-description" role="status">Select a profile to see its recovery requirements.</span>
+            <label class="switch" id="catalog-preset-approval" hidden><input id="catalog-preset-approve" type="checkbox" name="approve" value="1"> I approve this authorized source for recovery and automatic catalog loading.</label>
+            <button id="magnet-download-submit" type="submit">Download</button>
+          </div>
+        </form>
+        <div id="magnet-download-status" class="result-line" role="status" aria-live="polite"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
           <div>
-            <label for="catalog-load-path">Or direct local database path</label>
-            <input id="catalog-load-path" name="catalog_path" placeholder="/path/to/recovered/catalog.sqlite">
+            <h3>Transfers and recovery</h3>
+            <p class="panel-note">Every recorded reference, with its live download and recovery state.</p>
+          </div>
+          <span class="downloads-refresh" id="magnet-list-meta">Refreshing&hellip;</span>
+        </div>
+        <div class="table-scroll">
+          <table class="admin-table">
+            <thead>
+              <tr><th scope="col">Kind</th><th scope="col">Name</th><th scope="col">Reference</th><th scope="col">Destination</th><th scope="col">State</th></tr>
+            </thead>
+            <tbody id="magnet-download-list"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    {{/* ----------------------------------------------------------- Catalog */}}
+    <section class="card admin-panel" id="catalog-source-admin" data-panel="catalog-source-admin" aria-label="Catalog recovery sources" hidden>
+      <div class="panel-head">
+        <div>
+          <div class="muted section-eyebrow">Catalog recovery sources</div>
+          <h2>Validate before load</h2>
+          <p class="panel-note">Upload an authorized SQLite backup, attach the customer download magnet, and optionally load the validated database immediately. The app stores the backup read-only; an approved torrent client must seed the matching magnet.</p>
+        </div>
+        <span class="tag is-warn">Validate before load</span>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>Upload a recovery database</h3></div></div>
+        <form method="post" action="/api/admin/catalog-sources/upload" enctype="multipart/form-data" class="field-grid">
+          <div class="field">
+            <label for="catalog-upload-name">Display name</label>
+            <input id="catalog-upload-name" name="name" required placeholder="Primary recovery catalog">
+          </div>
+          <div class="field">
+            <label for="catalog-upload-magnet">Customer magnet link</label>
+            <input id="catalog-upload-magnet" name="magnet" required placeholder="magnet:?xt=urn:btih:...">
+          </div>
+          <div class="field">
+            <label for="catalog-upload-file">SQLite catalog backup</label>
+            <input id="catalog-upload-file" name="catalog_file" type="file" accept=".sqlite,.db,application/x-sqlite3" required>
+          </div>
+          <div class="field">
+            <span class="hint">The file is validated against the catalog schema before it is stored.</span>
+            <label class="switch"><input type="checkbox" name="enabled" checked> Show magnet in the customer recovery dropdown</label>
+            <label class="switch"><input type="checkbox" name="load_now" checked> Validate and load this database immediately</label>
+            <button type="submit">Upload and Publish Recovery Catalog</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h3>Register a local file</h3>
+            <p class="panel-note">Already have the database on this machine? Register its path instead of uploading a second copy.</p>
           </div>
         </div>
-        <button type="submit">Validate and Load Catalog</button>
-        <div id="catalog-load-status" class="muted" role="status" aria-live="polite"></div>
-      </form>
-      <div class="side-list" style="margin-top:14px;">
-        {{range .CatalogSources}}
-          <div class="kv">
-            <div>
-              <strong>{{.Name}}</strong>
-              <div class="muted">{{if .Enabled}}Customer-visible{{else}}Hidden from customers{{end}}</div>
-              <div class="muted">{{if .Magnet}}{{.Magnet}}{{else}}No magnet link configured{{end}}</div>
-              <div class="muted">{{if .CatalogPath}}Local DB: {{.CatalogPath}}{{else}}No local DB path configured{{end}}</div>
-            </div>
-            <div class="toolbar">
-              <form method="post" action="/api/admin/catalog-sources/update" class="form-grid" style="grid-template-columns: 1fr 1.5fr 1.5fr auto; gap:8px; align-items:end;">
-                <input type="hidden" name="id" value="{{.ID}}">
-                <input name="name" value="{{.Name}}" aria-label="Catalog source name">
-                <input name="magnet" value="{{.Magnet}}" aria-label="Catalog source magnet">
-                <input name="catalog_path" value="{{.CatalogPath}}" aria-label="Catalog source local database path">
-                <button type="submit" style="width:auto">Save</button>
-              </form>
-              <form method="post" action="/api/admin/catalog-sources/delete" style="display:inline">
-                <input type="hidden" name="id" value="{{.ID}}">
-                <button type="submit" class="button-secondary" style="width:auto;padding:6px 10px">Delete</button>
-              </form>
-              <form method="post" action="/api/admin/catalog-sources/toggle" style="display:inline">
-                <input type="hidden" name="id" value="{{.ID}}">
-                {{if .Enabled}}<input type="hidden" name="enabled" value="0"><button type="submit" class="button-secondary" style="width:auto;padding:6px 10px">Hide</button>{{else}}<input type="hidden" name="enabled" value="1"><button type="submit" style="width:auto;padding:6px 10px">Show</button>{{end}}
-              </form>
-            </div>
+        <form method="post" action="/api/admin/catalog-sources" class="field-grid">
+          <div class="field">
+            <label for="catalog-register-name">Name</label>
+            <input id="catalog-register-name" name="name" required placeholder="Primary recovery catalog">
           </div>
-        {{else}}
-          <div class="kv"><span>Recovery sources</span><span class="muted">No catalog recovery sources configured yet.</span></div>
-        {{end}}
+          <div class="field">
+            <label for="catalog-register-magnet">Magnet link</label>
+            <input id="catalog-register-magnet" name="magnet" placeholder="magnet:?xt=urn:btih:...">
+          </div>
+          <div class="field">
+            <label for="catalog-register-path">Local SQLite database path (optional)</label>
+            <input id="catalog-register-path" name="catalog_path" placeholder="/path/to/recovered/catalog.sqlite">
+          </div>
+          <div class="field">
+            <span class="hint">Loading validates the file and then swaps the read-only catalog handle.</span>
+            <label class="switch"><input type="checkbox" name="enabled" checked> Show magnet in the customer recovery dropdown</label>
+            <label class="switch"><input type="checkbox" name="load_now" checked> Validate and load immediately when a local database path is provided</label>
+            <button type="submit">Register source</button>
+          </div>
+        </form>
       </div>
-    </div>
-    <div class="card admin-section" id="admin-settings">
-      {{template "sectiontitle" "Tor Settings"}}
-      <p class="muted">Settings are stored in the app-owned SQLite state database. The catalog database remains read-only.</p>
-      <form method="post" action="/api/admin/tor" class="form-section">
-        <div class="form-grid">
+
+      <div class="panel" id="catalog-load">
+        <div class="panel-head">
           <div>
-            <label>Tor Mode</label>
-            <select name="tor_mode">
+            <h3>Load into search</h3>
+            <p class="panel-note">Validate a configured source or a direct local path, then point catalog searches at it.</p>
+          </div>
+        </div>
+        <form id="catalog-load-form" method="post" action="/api/admin/catalog-sources/load" class="field-grid">
+          <div class="field">
+            <label for="catalog-load-source">Load configured database</label>
+            <select id="catalog-load-source" name="source_id">
+              <option value="">Use a direct path instead</option>
+              {{range .CatalogSources}}<option value="{{.ID}}">{{.Name}}{{if .CatalogPath}} &middot; local path configured{{else}} &middot; magnet only{{end}}</option>{{end}}
+            </select>
+          </div>
+          <div class="field">
+            <label for="catalog-load-path">Or a direct local database path</label>
+            <input id="catalog-load-path" name="catalog_path" placeholder="/path/to/recovered/catalog.sqlite">
+          </div>
+          <div class="field">
+            <span class="hint">The running catalog is only replaced after the candidate file passes validation.</span>
+            <button type="submit">Validate and load catalog</button>
+          </div>
+        </form>
+        <div id="catalog-load-status" class="result-line" role="status" aria-live="polite"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h3>Configured sources</h3>
+            <p class="panel-note">Edit a source in place, load it into search, hide it from customers, or delete it.</p>
+          </div>
+          <span class="tag is-muted">{{len .CatalogSources}} configured</span>
+        </div>
+        <div class="table-scroll">
+          <table class="admin-table">
+            <thead>
+              <tr><th scope="col" class="cell-id">#</th><th scope="col">Name</th><th scope="col">Magnet</th><th scope="col">Local database</th><th scope="col">Visibility</th><th scope="col">Actions</th></tr>
+            </thead>
+            <tbody id="catalog-source-rows">
+              {{range .CatalogSources}}
+                <tr data-row-id="{{.ID}}">
+                  <td class="cell-id">{{.ID}}</td>
+                  <td><input form="catalog-source-{{.ID}}" name="name" value="{{.Name}}" aria-label="Catalog source name"></td>
+                  <td><input form="catalog-source-{{.ID}}" name="magnet" value="{{.Magnet}}" aria-label="Catalog source magnet" class="mono"></td>
+                  <td><input form="catalog-source-{{.ID}}" name="catalog_path" value="{{.CatalogPath}}" aria-label="Catalog source local database path" class="mono"></td>
+                  <td>{{if .Enabled}}<span class="tag is-ok">Visible</span>{{else}}<span class="tag is-muted">Hidden</span>{{end}}</td>
+                  <td class="cell-actions">
+                    <form id="catalog-source-{{.ID}}" method="post" action="/api/admin/catalog-sources/update">
+                      <input type="hidden" name="id" value="{{.ID}}">
+                      <button type="submit" class="btn-sm">Save</button>
+                      <button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/catalog-sources/load">Load</button>
+                      {{if .Enabled}}<input type="hidden" name="enabled" value="0"><button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/catalog-sources/toggle">Hide</button>{{else}}<input type="hidden" name="enabled" value="1"><button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/catalog-sources/toggle">Show</button>{{end}}
+                      <button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/catalog-sources/delete" data-confirm="Delete this recovery source?">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              {{else}}
+                <tr class="row-empty"><td colspan="6">No catalog recovery sources configured yet.</td></tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    {{/* ----------------------------------------------------------- Imports */}}
+    <section class="card admin-panel" id="import-state" data-panel="import-state" aria-label="Import state" hidden>
+      <div class="panel-head">
+        <div>
+          <div class="muted section-eyebrow">Import state</div>
+          <h2>Approved sources and runs</h2>
+          <p class="panel-note">Approved import sources and runs are persisted in app state for later authorized ingestion work. Rows are editable in place and the views page through the admin API.</p>
+        </div>
+        <span class="tag is-muted">{{len .ImportSources}} sources</span>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>Add an import source</h3></div></div>
+        <form method="post" action="/api/admin/import-sources" class="field-grid-3">
+          <div class="field">
+            <label for="import-source-name">Name</label>
+            <input id="import-source-name" name="name" placeholder="Main index mirror">
+          </div>
+          <div class="field">
+            <label for="import-source-kind">Kind</label>
+            <input id="import-source-kind" name="kind" placeholder="file, http, api">
+          </div>
+          <div class="field">
+            <label for="import-source-location">Location</label>
+            <input id="import-source-location" name="location" placeholder="https://example.com/feed.json or /path/to/file">
+          </div>
+          <div class="field">
+            <span class="hint">Only add endpoints you own or are authorized to read.</span>
+            <label class="switch"><input type="checkbox" name="enabled" checked> Enable source immediately</label>
+            <button type="submit">Add source</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel" data-table="sources">
+        <div class="panel-head">
+          <div>
+            <h3>Import sources</h3>
+            <p class="panel-note">Paged from <code>/api/admin/import-sources/list</code>. Select a row name to inspect the stored record.</p>
+          </div>
+          <div class="table-bar-controls">
+            <input type="search" id="sources-q" placeholder="Filter sources" aria-label="Filter import sources">
+            <label class="switch"><input type="checkbox" id="sources-auto" checked> Auto</label>
+            <a id="sources-export" class="btn-sm btn-quiet" href="/api/admin/import-sources/export?download=1" download="import-sources.json">Export JSON</a>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="admin-table">
+            <thead>
+              <tr><th scope="col" class="cell-id">#</th><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Created</th><th scope="col">State</th><th scope="col">Actions</th></tr>
+            </thead>
+            <tbody id="sources-rows">
+              {{range .ImportSources}}
+                <tr data-row-id="{{.ID}}">
+                  <td class="cell-id">{{.ID}}</td>
+                  <td>
+                    <div class="stack">
+                      <button type="button" class="row-select" data-select-id="{{.ID}}">{{.Name}}</button>
+                      <input form="import-source-{{.ID}}" name="location" value="{{.Location}}" aria-label="Source location" class="mono">
+                    </div>
+                  </td>
+                  <td><input form="import-source-{{.ID}}" name="kind" value="{{.Kind}}" aria-label="Source kind"></td>
+                  <td class="nowrap muted">{{.CreatedAt}}</td>
+                  <td>{{if .Enabled}}<span class="tag is-ok">Enabled</span>{{else}}<span class="tag is-muted">Disabled</span>{{end}}</td>
+                  <td class="cell-actions">
+                    <form id="import-source-{{.ID}}" method="post" action="/api/admin/import-sources/update">
+                      <input type="hidden" name="id" value="{{.ID}}">
+                      <input type="hidden" name="name" value="{{.Name}}">
+                      <button type="submit" class="btn-sm">Save</button>
+                      {{if .Enabled}}<input type="hidden" name="enabled" value="0"><button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/import-sources/toggle">Disable</button>{{else}}<input type="hidden" name="enabled" value="1"><button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/import-sources/toggle">Enable</button>{{end}}
+                      <button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/import-sources/delete" data-confirm="Delete this import source?">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              {{else}}
+                <tr class="row-empty"><td colspan="6">No approved sources configured yet.</td></tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <span class="muted" id="sources-meta">Showing the most recent sources.</span>
+          <div class="table-bar-controls">
+            <button type="button" id="sources-prev" class="btn-sm btn-quiet">Previous</button>
+            <button type="button" id="sources-next" class="btn-sm btn-quiet">Next</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" data-table="runs">
+        <div class="panel-head">
+          <div>
+            <h3>Import runs</h3>
+            <p class="panel-note">Paged from <code>/api/admin/import-runs/list</code>. Status and message are editable in place.</p>
+          </div>
+          <div class="table-bar-controls">
+            <input type="search" id="runs-q" placeholder="Filter runs" aria-label="Filter import runs">
+            <label class="switch"><input type="checkbox" id="runs-auto" checked> Auto</label>
+            <a id="runs-export" class="btn-sm btn-quiet" href="/api/admin/import-runs/export?download=1" download="import-runs.json">Export JSON</a>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="admin-table">
+            <thead>
+              <tr><th scope="col" class="cell-id">Run</th><th scope="col">Source</th><th scope="col">Status</th><th scope="col">Message</th><th scope="col">Started</th><th scope="col">Actions</th></tr>
+            </thead>
+            <tbody id="runs-rows">
+              {{range .ImportRuns}}
+                <tr data-row-id="{{.ID}}">
+                  <td class="cell-id">{{.ID}}</td>
+                  <td>
+                    <div class="stack">
+                      <button type="button" class="row-select" data-select-id="{{.ID}}">Run #{{.ID}}</button>
+                      <span class="muted mono">{{.ApprovedRef}}</span>
+                    </div>
+                  </td>
+                  <td><input form="import-run-{{.ID}}" name="status" value="{{.Status}}" aria-label="Run status"></td>
+                  <td><input form="import-run-{{.ID}}" name="message" value="{{.Message}}" aria-label="Run message"></td>
+                  <td class="nowrap muted">{{.StartedAt}}</td>
+                  <td class="cell-actions">
+                    <form id="import-run-{{.ID}}" method="post" action="/api/admin/import-runs/finish">
+                      <input type="hidden" name="id" value="{{.ID}}">
+                      <button type="submit" class="btn-sm">Update</button>
+                      <button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/import-runs/delete" data-confirm="Delete this import run?">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              {{else}}
+                <tr class="row-empty"><td colspan="6">No import runs recorded yet.</td></tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <span class="muted" id="runs-meta">Showing the most recent runs.</span>
+          <div class="table-bar-controls">
+            <button type="button" id="runs-prev" class="btn-sm btn-quiet">Previous</button>
+            <button type="button" id="runs-next" class="btn-sm btn-quiet">Next</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>Record an import run</h3><p class="panel-note">Log an authorized run against a stored source.</p></div></div>
+        <form method="post" action="/api/admin/import-runs" class="field-grid">
+          <div class="field">
+            <label for="run-source-id">Source ID</label>
+            <input id="run-source-id" name="source_id" placeholder="1">
+          </div>
+          <div class="field">
+            <label for="run-status">Status</label>
+            <input id="run-status" name="status" value="queued" placeholder="queued">
+          </div>
+          <div class="field">
+            <label for="run-message">Message</label>
+            <input id="run-message" name="message" placeholder="Manual import run recorded from the admin panel">
+          </div>
+          <div class="field">
+            <label for="run-checksum">Checksum</label>
+            <input id="run-checksum" name="checksum" placeholder="optional checksum">
+          </div>
+          <div class="field">
+            <label for="run-approved-ref">Approved ref</label>
+            <input id="run-approved-ref" name="approved_ref" placeholder="approved dataset reference">
+          </div>
+          <div class="field">
+            <span class="hint">Runs are metadata only; nothing is fetched by this form.</span>
+            <button type="submit">Record run</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    {{/* --------------------------------------------------------- Manifests */}}
+    <section class="card admin-panel" id="manifest-tools" data-panel="manifest-tools" aria-label="Manifest validation" hidden>
+      <div class="panel-head">
+        <div>
+          <div class="muted section-eyebrow">Manifest validation</div>
+          <h2>Validate before ingest</h2>
+          <p class="panel-note">Paste an authorized manifest to validate relative file paths and compute a preview checksum before any ingest work.</p>
+        </div>
+        <span class="tag is-muted">{{len .ImportManifests}} stored</span>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>Preview a manifest</h3></div></div>
+        <form id="manifest-preview-form" method="post" action="/api/admin/import-manifest/preview" class="field-grid">
+          <div class="field">
+            <label for="preview-name">Manifest name</label>
+            <input id="preview-name" name="name" placeholder="Approved dataset name">
+          </div>
+          <div class="field">
+            <label for="preview-approved-by">Approved by</label>
+            <input id="preview-approved-by" name="approved_by" placeholder="owner@example.com">
+          </div>
+          <div class="field">
+            <label for="preview-base-dir">Base directory</label>
+            <input id="preview-base-dir" name="base_dir" placeholder=".">
+          </div>
+          <div class="field">
+            <label for="preview-checksum">Checksum</label>
+            <input id="preview-checksum" name="checksum" placeholder="optional sha256">
+          </div>
+          <div class="field span-all">
+            <label for="preview-files">Files</label>
+            <textarea id="preview-files" name="files" rows="5" placeholder="relative/path/one.txt&#10;relative/path/two.txt"></textarea>
+          </div>
+          <div class="field">
+            <span class="hint">Paths are resolved inside the base directory; traversal is rejected.</span>
+            <button type="submit">Preview manifest</button>
+          </div>
+        </form>
+        <div id="manifest-preview-result" class="panel">
+          <div class="panel-head">
+            <div><h3>Preview output</h3><p class="panel-note">Resolved files and computed checksum for the manifest above.</p></div>
+            <button type="button" id="manifest-preview-copy" class="btn-sm btn-quiet">Copy JSON</button>
+          </div>
+          <pre id="manifest-preview-json" class="muted"></pre>
+        </div>
+      </div>
+
+      <div class="panel" data-table="manifests">
+        <div class="panel-head">
+          <div>
+            <h3>Stored manifests</h3>
+            <p class="panel-note">Paged from <code>/api/admin/import-manifests/list</code>. Select a row name to load <code>/api/admin/import-manifests/detail</code>.</p>
+          </div>
+          <div class="table-bar-controls">
+            <input type="search" id="manifests-q" placeholder="Filter manifests" aria-label="Filter manifests">
+            <label class="switch"><input type="checkbox" id="manifests-auto" checked> Auto</label>
+            <a id="manifests-export" class="btn-sm btn-quiet" href="/api/admin/import-manifests/export?download=1" download="import-manifests.json">Export JSON</a>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="admin-table">
+            <thead>
+              <tr><th scope="col" class="cell-id">#</th><th scope="col">Name</th><th scope="col">Approved by</th><th scope="col">Base directory</th><th scope="col">Preview checksum</th><th scope="col" class="cell-num">Bytes</th><th scope="col">Actions</th></tr>
+            </thead>
+            <tbody id="manifests-rows">
+              {{range .ImportManifests}}
+                <tr data-row-id="{{.ID}}">
+                  <td class="cell-id">{{.ID}}</td>
+                  <td><button type="button" class="row-select" data-select-id="{{.ID}}">{{.Name}}</button></td>
+                  <td class="muted">{{.ApprovedBy}}</td>
+                  <td class="mono">{{.BaseDir}}</td>
+                  <td class="mono">{{.PreviewChecksum}}</td>
+                  <td class="cell-num">{{.TotalBytes}}</td>
+                  <td class="cell-actions">
+                    <form id="import-manifest-{{.ID}}" method="post" action="/api/admin/import-manifests/delete">
+                      <input type="hidden" name="id" value="{{.ID}}">
+                      <button type="submit" class="btn-sm btn-quiet" data-confirm="Delete this manifest record?">Delete</button>
+                    </form>
+                  </td>
+                </tr>
+              {{else}}
+                <tr class="row-empty"><td colspan="7">No stored manifests yet.</td></tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <span class="muted" id="manifests-meta">Showing the most recent manifests.</span>
+          <div class="table-bar-controls">
+            <button type="button" id="manifests-prev" class="btn-sm btn-quiet">Previous</button>
+            <button type="button" id="manifests-next" class="btn-sm btn-quiet">Next</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>Record a validated manifest</h3><p class="panel-note">Stores the manifest and the run it belongs to in app state.</p></div></div>
+        <form method="post" action="/api/admin/import-manifest/record" class="field-grid">
+          <div class="field">
+            <label for="record-source-id">Source ID</label>
+            <input id="record-source-id" name="source_id" placeholder="1">
+          </div>
+          <div class="field">
+            <label for="record-status">Run status</label>
+            <input id="record-status" name="status" value="queued" placeholder="queued">
+          </div>
+          <div class="field">
+            <label for="record-name">Manifest name</label>
+            <input id="record-name" name="name" placeholder="Approved dataset name">
+          </div>
+          <div class="field">
+            <label for="record-approved-by">Approved by</label>
+            <input id="record-approved-by" name="approved_by" placeholder="owner@example.com">
+          </div>
+          <div class="field">
+            <label for="record-base-dir">Base directory</label>
+            <input id="record-base-dir" name="base_dir" placeholder=".">
+          </div>
+          <div class="field">
+            <label for="record-checksum">Checksum</label>
+            <input id="record-checksum" name="checksum" placeholder="optional sha256">
+          </div>
+          <div class="field span-all">
+            <label for="record-files">Files</label>
+            <textarea id="record-files" name="files" rows="5" placeholder="relative/path/one.txt&#10;relative/path/two.txt"></textarea>
+          </div>
+          <div class="field">
+            <label for="record-approved-ref">Approved ref</label>
+            <input id="record-approved-ref" name="approved_ref" placeholder="approved dataset reference">
+          </div>
+          <div class="field">
+            <label for="record-message">Message</label>
+            <input id="record-message" name="message" placeholder="validated manifest recorded from admin">
+          </div>
+          <div class="field">
+            <span class="hint">The manifest is validated again before it is stored.</span>
+            <button type="submit">Validate and record run</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    {{/* -------------------------------------------------------------- Audit */}}
+    <section class="card admin-panel" id="audit-log" data-panel="audit-log" aria-label="Audit log" hidden>
+      <div class="panel-head">
+        <div>
+          <div class="muted section-eyebrow">Audit log</div>
+          <h2>Recorded admin activity</h2>
+          <p class="panel-note">Every state change writes an audit row. Paged from <code>/api/admin/audits</code>.</p>
+        </div>
+        <span class="tag is-muted">{{len .AuditEntries}} shown</span>
+      </div>
+      <div class="table-scroll">
+        <table class="admin-table">
+          <thead>
+            <tr><th scope="col" class="cell-id">#</th><th scope="col">Action</th><th scope="col">Details</th><th scope="col">Created</th><th scope="col">Actions</th></tr>
+          </thead>
+          <tbody id="audit-rows">
+            {{range .AuditEntries}}
+              <tr data-row-id="{{.ID}}">
+                <td class="cell-id">{{.ID}}</td>
+                <td><button type="button" class="row-select" data-select-id="{{.ID}}">{{.Action}}</button></td>
+                <td class="muted">{{.Details}}</td>
+                <td class="nowrap muted">{{.CreatedAt}}</td>
+                <td class="cell-actions">
+                  <form id="audit-{{.ID}}" method="post" action="/api/admin/audits/delete">
+                    <input type="hidden" name="id" value="{{.ID}}">
+                    <button type="submit" class="btn-sm btn-quiet" data-confirm="Delete this audit entry?">Delete</button>
+                  </form>
+                </td>
+              </tr>
+            {{else}}
+              <tr class="row-empty"><td colspan="5">No audit rows recorded yet.</td></tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <span class="muted" id="audit-meta">Showing the most recent audit rows.</span>
+        <div class="table-bar-controls">
+          <input type="search" id="audit-q" placeholder="Filter audits" aria-label="Filter audits">
+          <label class="switch"><input type="checkbox" id="audit-auto" checked> Auto</label>
+          <a id="audit-export" class="btn-sm btn-quiet" href="/api/admin/audits/export?download=1" download="audits.json">Export JSON</a>
+          <button type="button" id="audit-prev" class="btn-sm btn-quiet">Previous</button>
+          <button type="button" id="audit-next" class="btn-sm btn-quiet">Next</button>
+        </div>
+      </div>
+    </section>
+
+    {{/* ----------------------------------------------------------- Settings */}}
+    <section class="card admin-panel" id="admin-settings" data-panel="admin-settings" aria-label="Admin settings" hidden>
+      <div class="panel-head">
+        <div>
+          <div class="muted section-eyebrow">Settings</div>
+          <h2>Tor configuration</h2>
+          <p class="panel-note">Settings are stored in the app-owned SQLite state database. The catalog database remains read-only, and this panel reports configuration rather than managing a Tor daemon.</p>
+        </div>
+        <span class="tag {{if .TorEnabled}}is-ok{{else}}is-muted{{end}}">Tor {{if .TorEnabled}}enabled{{else}}off{{end}}</span>
+      </div>
+      <div class="panel">
+        <form method="post" action="/api/admin/tor" class="field-grid">
+          <div class="field">
+            <label for="tor-mode">Tor mode</label>
+            <select id="tor-mode" name="tor_mode">
               <option value="off" {{if eq .TorMode "off"}}selected{{end}}>Off</option>
               <option value="clearnet" {{if eq .TorMode "clearnet"}}selected{{end}}>Clearnet only</option>
               <option value="onion" {{if eq .TorMode "onion"}}selected{{end}}>Onion only</option>
               <option value="dual" {{if eq .TorMode "dual"}}selected{{end}}>Dual mode</option>
             </select>
           </div>
-          <div>
-            <label>Tor Status</label>
-            <input value="{{.TorStatus}}" disabled>
+          <div class="field">
+            <label for="tor-status">Tor status</label>
+            <input id="tor-status" value="{{.TorStatus}}" disabled>
           </div>
-        </div>
-        <div class="form-grid">
-          <div>
-            <label class="check-label"><input type="checkbox" name="tor_enabled" value="1" {{if .TorEnabled}}checked{{end}}> Enable Tor integration</label>
+          <div class="field">
+            <label for="tor-enabled">Integration</label>
+            <label class="switch"><input id="tor-enabled" type="checkbox" name="tor_enabled" value="1" {{if .TorEnabled}}checked{{end}}> Enable Tor integration</label>
+            <label class="switch"><input type="checkbox" name="tor_autostart" value="1" {{if .TorAutostart}}checked{{end}}> Start with Tor on boot</label>
           </div>
-          <div>
-            <label class="check-label"><input type="checkbox" name="tor_autostart" value="1" {{if .TorAutostart}}checked{{end}}> Start with Tor on boot</label>
+          <div class="field">
+            <span class="hint">Tor enablement is opt-in and off by default.</span>
           </div>
-        </div>
-        <label>Onion Address</label>
-        <input name="onion_address" value="{{.OnionAddress}}" placeholder="Generated after Tor bootstrap">
-        <label>Tor Control Address</label>
-        <input name="tor_control_addr" value="{{.TorControlAddr}}" placeholder="127.0.0.1:9051">
-        <button type="submit">Save Settings</button>
-      </form>
-      <form method="post" action="/api/admin/logout"><button type="submit" class="button-primary button-secondary">Logout</button></form>
+          <div class="field">
+            <label for="onion-address">Onion address</label>
+            <input id="onion-address" name="onion_address" value="{{.OnionAddress}}" placeholder="Generated after Tor bootstrap">
+          </div>
+          <div class="field">
+            <label for="tor-control-addr">Tor control address</label>
+            <input id="tor-control-addr" name="tor_control_addr" value="{{.TorControlAddr}}" placeholder="127.0.0.1:9051">
+          </div>
+          <div class="field">
+            <span class="hint">Session epoch {{.AdminSessionEpoch}} is bumped only on logout.</span>
+            <button type="submit">Save settings</button>
+          </div>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div><h3>Session</h3><p class="panel-note">Signing out revokes the current admin cookie server-side and records an audit row.</p></div></div>
+        <form method="post" action="/api/admin/logout">
+          <button type="submit" class="btn-quiet">Sign out</button>
+        </form>
+      </div>
+    </section>
+
   </div>
-  <div class="card admin-section" id="import-state">
-      {{template "sectiontitle" "Import State"}}
-      <p class="muted">Approved import sources and runs are persisted in app state for later authorized ingestion work.</p>
-      <form method="post" action="/api/admin/import-sources" class="form-section">
-        <div class="form-grid">
-          <div>
-            <label>Name</label>
-            <input name="name" placeholder="Main index mirror">
-          </div>
-          <div>
-            <label>Kind</label>
-            <input name="kind" placeholder="file, http, api">
-          </div>
-        </div>
-        <label>Location</label>
-        <input name="location" placeholder="https://example.com/feed.json or /path/to/file">
-        <label class="check-label"><input type="checkbox" name="enabled" checked> Enable source immediately</label>
-        <button type="submit">Add Import Source</button>
-      </form>
-      <div class="side-list">
-        {{range .ImportSources}}
-          <div class="kv">
-            <div>
-              <strong>{{.Name}}</strong>
-              <div class="muted">{{.Kind}} · {{.Location}}</div>
-              <div class="muted">Created {{.CreatedAt}}</div>
-            </div>
-            <div class="toolbar">
-              <form method="post" action="/api/admin/import-sources/update" class="form-grid" style="grid-template-columns: 1fr 1fr 1.5fr auto; gap:8px; align-items:end;">
-                <input type="hidden" name="id" value="{{.ID}}">
-                <input name="name" value="{{.Name}}" aria-label="Source name">
-                <input name="kind" value="{{.Kind}}" aria-label="Source kind">
-                <input name="location" value="{{.Location}}" aria-label="Source location">
-                <button type="submit" style="width:auto">Save</button>
-              </form>
-              <form method="post" action="/api/admin/import-sources/delete" style="display:inline">
-                <input type="hidden" name="id" value="{{.ID}}">
-                <button type="submit" class="button-secondary" style="width:auto;padding:6px 10px">Delete</button>
-              </form>
-              <form method="post" action="/api/admin/import-sources/toggle" style="display:inline">
-                <input type="hidden" name="id" value="{{.ID}}">
-                {{if .Enabled}}
-                  <input type="hidden" name="enabled" value="0">
-                  <button type="submit" class="button-secondary" style="width:auto;padding:6px 10px">Disable</button>
-                {{else}}
-                  <input type="hidden" name="enabled" value="1">
-                  <button type="submit" style="width:auto;padding:6px 10px">Enable</button>
-                {{end}}
-              </form>
-            </div>
-          </div>
-        {{else}}
-          <div class="kv"><span>Import sources</span><span class="muted">No approved sources configured yet.</span></div>
-        {{end}}
-      </div>
-      <div class="card" style="margin-top:18px;padding:18px;">
-        <div class="panel-head" style="margin-bottom:12px;">
-          <div>
-            <div class="muted section-eyebrow">Import Sources API</div>
-            <h2 class="section-title section-title-small" style="margin:0;">Paged import sources viewer</h2>
-            <div class="muted">Fetch recent import sources directly from <code>/api/admin/import-sources/list</code>.</div>
-          </div>
-          <div class="toolbar">
-            <input id="sources-q" placeholder="Filter sources" style="width:220px;">
-            <label class="check-label" style="display:flex;align-items:center;gap:8px;margin:0 8px 0 0;">
-              <input type="checkbox" id="sources-auto" checked>
-              Auto-refresh
-            </label>
-            <a id="sources-export" href="/api/admin/import-sources/export?download=1" download="import-sources.json" class="button-secondary" style="width:auto;display:inline-flex;align-items:center;justify-content:center;">Export JSON</a>
-            <button type="button" id="sources-prev" class="button-secondary" style="width:auto;">Prev</button>
-            <button type="button" id="sources-next" class="button-secondary" style="width:auto;">Next</button>
-          </div>
-        </div>
-        <div id="sources-meta" class="muted" style="margin-bottom:10px;"></div>
-        <div id="sources-api-list" class="side-list"></div>
-        <div id="sources-detail" class="kv" style="margin-top:12px;align-items:flex-start;">
-          <div>
-            <strong>Source detail</strong>
-            <div class="muted">Click a source row to inspect its stored fields here.</div>
-          </div>
-          <pre id="sources-detail-json" class="muted" style="white-space:pre-wrap;word-break:break-word;margin:0;max-width:100%;"></pre>
-        </div>
-      </div>
-      <div class="side-list">
-        {{range .ImportRuns}}
-          <div class="kv">
-            <div>
-              <strong>Run #{{.ID}}</strong>
-              <div class="muted">Source {{.SourceID}} · {{.Status}}</div>
-              <div class="muted">Started {{.StartedAt}} · Finished {{.FinishedAt}}</div>
-              <div class="muted">{{.Message}}</div>
-            </div>
-            <div class="toolbar">
-              <form method="post" action="/api/admin/import-runs/finish" class="form-grid" style="grid-template-columns: 1fr 1fr auto; gap:8px; align-items:end;">
-                <input type="hidden" name="id" value="{{.ID}}">
-                <input name="status" value="{{.Status}}" aria-label="Run status">
-                <input name="message" value="{{.Message}}" aria-label="Run message">
-                <button type="submit" style="width:auto">Update</button>
-              </form>
-              <form method="post" action="/api/admin/import-runs/delete" style="display:inline">
-                <input type="hidden" name="id" value="{{.ID}}">
-                <button type="submit" class="button-secondary" style="width:auto;padding:6px 10px">Delete</button>
-              </form>
-            </div>
-          </div>
-        {{else}}
-          <div class="kv"><span>Import runs</span><span class="muted">No import runs recorded yet.</span></div>
-        {{end}}
-      </div>
-      <div class="side-list" style="margin-top:18px;">
-        {{range .ImportManifests}}
-          <div class="kv">
-            <div>
-              <strong>{{.Name}}</strong>
-              <div class="muted">Approved by {{.ApprovedBy}} · {{.BaseDir}}</div>
-              <div class="muted">Checksum {{.PreviewChecksum}}</div>
-              <div class="muted">Bytes {{.TotalBytes}} · Created {{.CreatedAt}}</div>
-            </div>
-            <span class="muted">Manifest #{{.ID}}</span>
-          </div>
-        {{else}}
-          <div class="kv"><span>Import manifests</span><span class="muted">No stored manifests yet.</span></div>
-        {{end}}
-      </div>
-      <div class="card" style="margin-top:18px;padding:18px;">
-        <div class="panel-head" style="margin-bottom:12px;">
-          <div>
-            <div class="muted section-eyebrow">Import Manifests API</div>
-            <h2 class="section-title section-title-small" style="margin:0;">Paged manifest viewer</h2>
-            <div class="muted">Fetch stored manifest records directly from <code>/api/admin/import-manifests/list</code>. Select a row to load <code>/api/admin/import-manifests/detail</code>.</div>
-          </div>
-          <div class="toolbar">
-            <input id="manifests-q" placeholder="Filter manifests" style="width:220px;">
-            <label class="check-label" style="display:flex;align-items:center;gap:8px;margin:0 8px 0 0;">
-              <input type="checkbox" id="manifests-auto" checked>
-              Auto-refresh
-            </label>
-            <a id="manifests-export" href="/api/admin/import-manifests/export?download=1" download="import-manifests.json" class="button-secondary" style="width:auto;display:inline-flex;align-items:center;justify-content:center;">Export JSON</a>
-            <button type="button" id="manifests-prev" class="button-secondary" style="width:auto;">Prev</button>
-            <button type="button" id="manifests-next" class="button-secondary" style="width:auto;">Next</button>
-          </div>
-        </div>
-        <div id="manifests-meta" class="muted" style="margin-bottom:10px;"></div>
-        <div id="manifests-api-list" class="side-list"></div>
-        <div id="manifests-detail" class="kv" style="margin-top:12px;align-items:flex-start;">
-          <div>
-            <strong>Manifest detail</strong>
-            <div class="muted">Click a manifest row to inspect its stored fields here.</div>
-            <form id="manifest-delete-form" method="post" action="/api/admin/import-manifests/delete" style="margin-top:10px;">
-              <input type="hidden" name="id" id="manifest-delete-id">
-              <button type="submit" id="manifest-delete-button" class="button-secondary" style="width:auto;" disabled>Delete Manifest</button>
-            </form>
-          </div>
-          <pre id="manifests-detail-json" class="muted" style="white-space:pre-wrap;word-break:break-word;margin:0;max-width:100%;"></pre>
-        </div>
-      </div>
-      <div class="card" style="margin-top:18px;padding:18px;">
-        <div class="panel-head" style="margin-bottom:12px;">
-          <div>
-            <div class="muted section-eyebrow">Import Runs API</div>
-            <h2 class="section-title section-title-small" style="margin:0;">Paged import runs viewer</h2>
-            <div class="muted">Fetch recent import runs directly from <code>/api/admin/import-runs/list</code>.</div>
-          </div>
-          <div class="toolbar">
-            <input id="runs-q" placeholder="Filter runs" style="width:220px;">
-            <label class="check-label" style="display:flex;align-items:center;gap:8px;margin:0 8px 0 0;">
-              <input type="checkbox" id="runs-auto" checked>
-              Auto-refresh
-            </label>
-            <a id="runs-export" href="/api/admin/import-runs/export?download=1" download="import-runs.json" class="button-secondary" style="width:auto;display:inline-flex;align-items:center;justify-content:center;">Export JSON</a>
-            <button type="button" id="runs-prev" class="button-secondary" style="width:auto;">Prev</button>
-            <button type="button" id="runs-next" class="button-secondary" style="width:auto;">Next</button>
-          </div>
-        </div>
-        <div id="runs-meta" class="muted" style="margin-bottom:10px;"></div>
-        <div id="runs-api-list" class="side-list"></div>
-        <div id="runs-detail" class="kv" style="margin-top:12px;align-items:flex-start;">
-          <div>
-            <strong>Run detail</strong>
-            <div class="muted">Click a run row to inspect its stored fields here.</div>
-          </div>
-          <pre id="runs-detail-json" class="muted" style="white-space:pre-wrap;word-break:break-word;margin:0;max-width:100%;"></pre>
-        </div>
-      </div>
-        <div class="side-list" id="audit-log">
-        {{range .AuditEntries}}
-          <div class="kv">
-            <div>
-              <strong>{{.Action}}</strong>
-              <div class="muted">{{.Details}}</div>
-              <div class="muted">Created {{.CreatedAt}}</div>
-            </div>
-            <div class="toolbar">
-              <span class="muted">Audit #{{.ID}}</span>
-              <form method="post" action="/api/admin/audits/delete" style="display:inline">
-                <input type="hidden" name="id" value="{{.ID}}">
-                <button type="submit" class="button-secondary" style="width:auto;padding:6px 10px">Delete</button>
-              </form>
-            </div>
-          </div>
-        {{else}}
-          <div class="kv"><span>Audit log</span><span class="muted">No audit rows recorded yet.</span></div>
-        {{end}}
-      </div>
-      <div class="card" style="margin-top:18px;padding:18px;">
-        <div class="panel-head" style="margin-bottom:12px;">
-          <div>
-            <div class="muted section-eyebrow">Audit API</div>
-            <h2 class="section-title section-title-small" style="margin:0;">Paged audit viewer</h2>
-            <div class="muted">Fetch recent audit rows directly from <code>/api/admin/audits</code>.</div>
-          </div>
-          <div class="toolbar">
-            <input id="audit-q" placeholder="Filter audits" style="width:220px;">
-            <label class="check-label" style="display:flex;align-items:center;gap:8px;margin:0 8px 0 0;">
-              <input type="checkbox" id="audit-auto" checked>
-              Auto-refresh
-            </label>
-            <a id="audit-export" href="/api/admin/audits/export?download=1" download="audits.json" class="button-secondary" style="width:auto;display:inline-flex;align-items:center;justify-content:center;">Export JSON</a>
-            <button type="button" id="audit-prev" class="button-secondary" style="width:auto;">Prev</button>
-            <button type="button" id="audit-next" class="button-secondary" style="width:auto;">Next</button>
-          </div>
-        </div>
-        <div id="audit-meta" class="muted" style="margin-bottom:10px;"></div>
-        <div id="audit-api-list" class="side-list"></div>
-        <div id="audit-detail" class="kv" style="margin-top:12px;align-items:flex-start;">
-          <div>
-            <strong>Audit detail</strong>
-            <div class="muted">Click an audit row to inspect its stored fields here.</div>
-          </div>
-          <pre id="audit-detail-json" class="muted" style="white-space:pre-wrap;word-break:break-word;margin:0;max-width:100%;"></pre>
-        </div>
-      </div>
-      <form method="post" action="/api/admin/import-runs" class="form-section">
-        <div class="form-grid">
-          <div>
-            <label>Source ID</label>
-            <input name="source_id" placeholder="1">
-          </div>
-          <div>
-            <label>Status</label>
-            <input name="status" value="queued" placeholder="queued">
-          </div>
-        </div>
-        <label>Message</label>
-        <input name="message" placeholder="Manual import run recorded from the admin panel">
-        <div class="form-grid">
-          <div>
-            <label>Checksum</label>
-            <input name="checksum" placeholder="optional checksum">
-          </div>
-          <div>
-            <label>Approved Ref</label>
-            <input name="approved_ref" placeholder="approved dataset reference">
-          </div>
-        </div>
-        <button type="submit">Record Import Run</button>
-      </form>
-  </div>
-  <div class="card admin-section" id="manifest-tools">
-      {{template "sectiontitle" "Validate Manifest"}}
-      <p class="muted">Paste an authorized manifest to validate relative file paths and compute a preview checksum before any ingest work.</p>
-      <form id="manifest-preview-form" method="post" action="/api/admin/import-manifest/preview" class="form-section">
-        <div class="form-grid">
-          <div>
-            <label>Manifest Name</label>
-            <input name="name" placeholder="Approved dataset name">
-          </div>
-          <div>
-            <label>Approved By</label>
-            <input name="approved_by" placeholder="owner@example.com">
-          </div>
-        </div>
-        <div class="form-grid">
-          <div>
-            <label>Base Directory</label>
-            <input name="base_dir" placeholder=".">
-          </div>
-          <div>
-            <label>Checksum</label>
-            <input name="checksum" placeholder="optional sha256">
-          </div>
-        </div>
-        <label>Files</label>
-        <textarea name="files" rows="6" style="width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--panel-2);color:var(--text);" placeholder="relative/path/one.txt&#10;relative/path/two.txt"></textarea>
-        <button type="submit">Preview Manifest</button>
-      </form>
-      <div id="manifest-preview-result" class="kv" style="margin-top:18px;align-items:flex-start;">
-        <div>
-          <strong>Preview output</strong>
-          <div class="muted">Run a preview to inspect the resolved files and checksum here.</div>
-          <button type="button" id="manifest-preview-copy" class="button-secondary" style="margin-top:10px;width:auto;">Copy JSON</button>
-        </div>
-        <pre id="manifest-preview-json" class="muted" style="white-space:pre-wrap;word-break:break-word;margin:0;max-width:100%;"></pre>
-      </div>
-      <form method="post" action="/api/admin/import-manifest/record" class="form-section" style="margin-top:18px;border-top:1px solid var(--line-soft);padding-top:18px;">
-        <div class="form-grid">
-          <div>
-            <label>Source ID</label>
-            <input name="source_id" placeholder="1">
-          </div>
-          <div>
-            <label>Run Status</label>
-            <input name="status" value="queued" placeholder="queued">
-          </div>
-        </div>
-        <div class="form-grid">
-          <div>
-            <label>Manifest Name</label>
-            <input name="name" placeholder="Approved dataset name">
-          </div>
-          <div>
-            <label>Approved By</label>
-            <input name="approved_by" placeholder="owner@example.com">
-          </div>
-        </div>
-        <div class="form-grid">
-          <div>
-            <label>Base Directory</label>
-            <input name="base_dir" placeholder=".">
-          </div>
-          <div>
-            <label>Checksum</label>
-            <input name="checksum" placeholder="optional sha256">
-          </div>
-        </div>
-        <label>Files</label>
-        <textarea name="files" rows="6" style="width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--panel-2);color:var(--text);" placeholder="relative/path/one.txt&#10;relative/path/two.txt"></textarea>
-        <label>Approved Ref</label>
-        <input name="approved_ref" placeholder="approved dataset reference">
-        <label>Message</label>
-        <input name="message" placeholder="validated manifest recorded from admin">
-        <button type="submit">Validate and Record Run</button>
-      </form>
-      <script>
-        (function() {
-          const statusStats = document.getElementById('status-stats');
-          const statusMeta = document.getElementById('status-meta');
-          const statusHealth = document.getElementById('status-health');
-          const statusRefresh = document.getElementById('status-refresh');
-          const statusAuto = document.getElementById('status-auto');
-          const statusSession = document.getElementById('status-session');
-          const statusLogin = document.getElementById('status-login');
-          const statusLogout = document.getElementById('status-logout');
-          const adminTransferState = document.getElementById('admin-transfer-state');
-          const adminCatalogState = document.getElementById('admin-catalog-state');
-          const adminSourceState = document.getElementById('admin-source-state');
-          const workflowDownloadState = document.getElementById('workflow-download-state');
-          const workflowValidateState = document.getElementById('workflow-validate-state');
-          const workflowLoadState = document.getElementById('workflow-load-state');
-          const setWorkflowState = function(element, label, tone) {
-            if (!element) return;
-            element.textContent = label;
-            element.className = 'workflow-state' + (tone ? ' ' + tone : '');
-          };
-          if (statusStats && statusMeta && statusHealth && statusRefresh && statusAuto && statusSession && statusLogin && statusLogout) {
-            let statusTimer = null;
-            async function loadStatus() {
-              const res = await fetch('/api/admin/status');
-              const data = await res.json();
-              const counts = [
-                ['catalog sources', data.catalogSourceCount || 0],
-                ['sources', (data.importSources || []).length],
-                ['runs', (data.importRuns || []).length],
-                ['audits', (data.audits || []).length],
-                ['manifests', data.importManifestCount || (data.importManifests || []).length],
-              ];
-              statusStats.innerHTML = counts.map(function(item) {
-                return '<div class="card stat"><div class="k">' + item[0] + '</div><div class="v">' + item[1] + '</div></div>';
-              }).join('');
-              statusMeta.textContent = 'Last refreshed at ' + new Date().toLocaleString() + ' · Catalog ' + (data.catalogName || 'configured') + ' · Tor mode ' + (data.settings && data.settings.torMode ? data.settings.torMode : 'off') + ' · Manifest bytes ' + (data.importManifestTotalBytes || 0);
-              statusSession.textContent = 'Admin session epoch: ' + (data.adminSessionEpoch || 0);
-              statusLogin.textContent = data.lastLoginAt ? 'Last login audit: ' + data.lastLoginAt : 'Last login audit: none';
-              statusLogout.textContent = data.lastLogoutAt ? 'Last logout audit: ' + data.lastLogoutAt : 'Last logout audit: none';
-              const transferReady = Boolean(data.aria2 && data.aria2.installed);
-              const catalogReady = Boolean(data.catalogHealthy);
-              const recoveryLoaded = catalogReady && data.catalogName && data.catalogName !== 'Configured catalog';
-              const sourceCount = data.catalogSourceCount || 0;
-              if (adminTransferState) adminTransferState.textContent = transferReady ? 'Ready' : 'Unavailable';
-              if (adminCatalogState) adminCatalogState.textContent = recoveryLoaded ? 'Recovery loaded' : (catalogReady ? 'Base catalog' : 'Needs file');
-              if (adminSourceState) adminSourceState.textContent = sourceCount + ' published';
-              setWorkflowState(workflowValidateState, sourceCount ? 'Source registered' : 'Awaiting file', sourceCount ? 'is-ready' : '');
-              setWorkflowState(workflowLoadState, recoveryLoaded ? 'Loaded' : 'Ready when validated', recoveryLoaded ? 'is-ready' : '');
-              statusHealth.innerHTML = [
-                '<div class="kv"><span>Catalog DB</span><span class="muted">' + ((data.catalogHealthy ? 'healthy' : 'degraded')) + '</span></div>',
-                '<div class="kv"><span>State DB</span><span class="muted">' + ((data.stateHealthy ? 'healthy' : 'degraded')) + '</span></div>',
-                '<div class="kv"><span>External transfer client</span><span class="muted">' + (data.aria2 && data.aria2.installed ? 'aria2c detected' + (data.aria2.version ? ' · ' + data.aria2.version : '') : 'aria2c not detected') + '</span></div>'
-              ].join('');
-            }
-            function syncTimer() {
-              if (statusTimer) {
-                clearInterval(statusTimer);
-                statusTimer = null;
-              }
-              if (statusAuto.checked) {
-                statusTimer = setInterval(loadStatus, 30000);
-              }
-            }
-            statusRefresh.addEventListener('click', loadStatus);
-            statusAuto.addEventListener('change', syncTimer);
-            loadStatus();
-            syncTimer();
-          }
+</div>
+<script>
+  (function() {
+    'use strict';
 
-          const sourcesList = document.getElementById('sources-api-list');
-          const sourcesMeta = document.getElementById('sources-meta');
-          const sourcesDetail = document.getElementById('sources-detail-json');
-          const sourcesExport = document.getElementById('sources-export');
-          const sourcesPrev = document.getElementById('sources-prev');
-          const sourcesNext = document.getElementById('sources-next');
-          const sourcesQ = document.getElementById('sources-q');
-          const sourcesAuto = document.getElementById('sources-auto');
-          if (sourcesList && sourcesMeta && sourcesDetail && sourcesExport && sourcesPrev && sourcesNext && sourcesQ && sourcesAuto) {
-            let sourcesLimit = 5;
-            let sourcesOffset = 0;
-            let sourcesTimer = null;
-            let sourcesSelectedId = 0;
-            function escapeHtml(s) {
-              return String(s).replace(/[&<>"]/g, function(c) {
-                return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
-              });
-            }
-            async function loadSourceDetail(id) {
-              sourcesSelectedId = id;
-              const res = await fetch('/api/admin/import-sources/detail?id=' + id);
-              const data = await res.json();
-              sourcesDetail.textContent = JSON.stringify(data.source, null, 2);
-            }
-            async function loadSources() {
-              const q = encodeURIComponent(sourcesQ.value || '');
-              const res = await fetch('/api/admin/import-sources/list?limit=' + sourcesLimit + '&offset=' + sourcesOffset + '&q=' + q);
-              const data = await res.json();
-              sourcesExport.href = '/api/admin/import-sources/export?download=1&limit=' + sourcesLimit + '&offset=' + sourcesOffset + '&q=' + q;
-              sourcesMeta.textContent = 'Showing ' + data.items.length + ' rows starting at offset ' + data.offset + '. Next offset: ' + data.nextOffset + '. Refreshed ' + new Date().toLocaleString() + '.';
-              sourcesList.innerHTML = data.items.map(function(item) {
-                return '<button type="button" class="kv" data-source-id="' + item.id + '" style="text-align:left;width:100%;"><div><strong>' + escapeHtml(item.name) + '</strong><div class="muted">' + escapeHtml(item.kind) + ' · ' + escapeHtml(item.location) + '</div><div class="muted">Created ' + item.createdAt + '</div></div><span class="muted">' + (item.enabled ? 'enabled' : 'disabled') + '</span></button>';
-              }).join('') || '<div class="kv"><span>Import sources</span><span class="muted">No rows for this page.</span></div>';
-              sourcesList.querySelectorAll('[data-source-id]').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                  loadSourceDetail(parseInt(btn.getAttribute('data-source-id') || '0', 10));
-                });
-              });
-              sourcesPrev.disabled = sourcesOffset === 0;
-              sourcesNext.disabled = !data.hasMore;
-              sourcesPrev.style.opacity = sourcesPrev.disabled ? '.5' : '1';
-              sourcesNext.style.opacity = sourcesNext.disabled ? '.5' : '1';
-              sourcesPrev.dataset.offset = String(Math.max(0, sourcesOffset - sourcesLimit));
-              sourcesNext.dataset.offset = String(data.nextOffset);
-              if (!sourcesSelectedId && data.items.length) {
-                loadSourceDetail(data.items[0].id);
-              }
-              if (!data.items.length) {
-                sourcesSelectedId = 0;
-                sourcesDetail.textContent = '';
-              }
-            }
-            sourcesPrev.addEventListener('click', function() {
-              sourcesOffset = parseInt(sourcesPrev.dataset.offset || '0', 10);
-              loadSources();
-            });
-            sourcesNext.addEventListener('click', function() {
-              sourcesOffset = parseInt(sourcesNext.dataset.offset || '0', 10);
-              loadSources();
-            });
-            sourcesQ.addEventListener('change', function() {
-              sourcesOffset = 0;
-              loadSources();
-            });
-            function syncSourcesTimer() {
-              if (sourcesTimer) {
-                clearInterval(sourcesTimer);
-                sourcesTimer = null;
-              }
-              if (sourcesAuto.checked) {
-                sourcesTimer = setInterval(loadSources, 30000);
-              }
-            }
-            sourcesAuto.addEventListener('change', syncSourcesTimer);
-            loadSources();
-            syncSourcesTimer();
-          }
+    const TONES = { ok: 'is-ok', warn: 'is-warn', error: 'is-error', muted: 'is-muted' };
+    const REFRESH_MS = 30000;
 
-          const runsList = document.getElementById('runs-api-list');
-          const runsMeta = document.getElementById('runs-meta');
-          const runsDetail = document.getElementById('runs-detail-json');
-          const runsExport = document.getElementById('runs-export');
-          const runsPrev = document.getElementById('runs-prev');
-          const runsNext = document.getElementById('runs-next');
-          const runsQ = document.getElementById('runs-q');
-          const runsAuto = document.getElementById('runs-auto');
-          if (runsList && runsMeta && runsDetail && runsExport && runsPrev && runsNext && runsQ && runsAuto) {
-            let runsLimit = 5;
-            let runsOffset = 0;
-            let runsTimer = null;
-            let runsSelectedId = 0;
-            function escapeHtml(s) {
-              return String(s).replace(/[&<>"]/g, function(c) {
-                return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
-              });
-            }
-            async function loadRunDetail(id) {
-              runsSelectedId = id;
-              const res = await fetch('/api/admin/import-runs/detail?id=' + id);
-              const data = await res.json();
-              runsDetail.textContent = JSON.stringify(data.run, null, 2);
-            }
-            async function loadRuns() {
-              const q = encodeURIComponent(runsQ.value || '');
-              const res = await fetch('/api/admin/import-runs/list?limit=' + runsLimit + '&offset=' + runsOffset + '&q=' + q);
-              const data = await res.json();
-              runsExport.href = '/api/admin/import-runs/export?download=1&limit=' + runsLimit + '&offset=' + runsOffset + '&q=' + q;
-              runsMeta.textContent = 'Showing ' + data.items.length + ' rows starting at offset ' + data.offset + '. Next offset: ' + data.nextOffset + '. Refreshed ' + new Date().toLocaleString() + '.';
-              runsList.innerHTML = data.items.map(function(item) {
-                return '<button type="button" class="kv" data-run-id="' + item.id + '" style="text-align:left;width:100%;"><div><strong>Run #' + item.id + '</strong><div class="muted">Source ' + item.sourceId + ' · ' + escapeHtml(item.status) + '</div><div class="muted">' + escapeHtml(item.message) + '</div><div class="muted">Started ' + item.startedAt + '</div></div><span class="muted">' + escapeHtml(item.approvedRef || '') + '</span></button>';
-              }).join('') || '<div class="kv"><span>Import runs</span><span class="muted">No runs for this page.</span></div>';
-              runsList.querySelectorAll('[data-run-id]').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                  loadRunDetail(parseInt(btn.getAttribute('data-run-id') || '0', 10));
-                });
-              });
-              runsPrev.disabled = runsOffset === 0;
-              runsNext.disabled = !data.hasMore;
-              runsPrev.style.opacity = runsPrev.disabled ? '.5' : '1';
-              runsNext.style.opacity = runsNext.disabled ? '.5' : '1';
-              runsPrev.dataset.offset = String(Math.max(0, runsOffset - runsLimit));
-              runsNext.dataset.offset = String(data.nextOffset);
-              if (!runsSelectedId && data.items.length) {
-                loadRunDetail(data.items[0].id);
-              }
-            }
-            runsPrev.addEventListener('click', function() {
-              runsOffset = parseInt(runsPrev.dataset.offset || '0', 10);
-              loadRuns();
-            });
-            runsNext.addEventListener('click', function() {
-              runsOffset = parseInt(runsNext.dataset.offset || '0', 10);
-              loadRuns();
-            });
-            runsQ.addEventListener('change', function() {
-              runsOffset = 0;
-              loadRuns();
-            });
-            function syncRunsTimer() {
-              if (runsTimer) {
-                clearInterval(runsTimer);
-                runsTimer = null;
-              }
-              if (runsAuto.checked) {
-                runsTimer = setInterval(loadRuns, 30000);
-              }
-            }
-            runsAuto.addEventListener('change', syncRunsTimer);
-            loadRuns();
-            syncRunsTimer();
-          }
+    function escapeHtml(value) {
+      return String(value == null ? '' : value).replace(/[&<>"]/g, function(char) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char];
+      });
+    }
 
-          const auditList = document.getElementById('audit-api-list');
-          const auditMeta = document.getElementById('audit-meta');
-          const auditDetail = document.getElementById('audit-detail-json');
-          const auditExport = document.getElementById('audit-export');
-          const auditPrev = document.getElementById('audit-prev');
-          const auditNext = document.getElementById('audit-next');
-          const auditQ = document.getElementById('audit-q');
-          const auditAuto = document.getElementById('audit-auto');
-          if (auditList && auditMeta && auditDetail && auditExport && auditPrev && auditNext && auditQ && auditAuto) {
-            let auditLimit = 5;
-            let auditOffset = 0;
-            let auditTimer = null;
-            let auditSelectedId = 0;
-            function escapeHtml(s) {
-              return String(s).replace(/[&<>"]/g, function(c) {
-                return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
-              });
-            }
-            async function loadAuditDetail(id) {
-              auditSelectedId = id;
-              const res = await fetch('/api/admin/audits/detail?id=' + id);
-              const data = await res.json();
-              auditDetail.textContent = JSON.stringify(data.audit, null, 2);
-            }
-            async function loadAudits() {
-              const q = encodeURIComponent(auditQ.value || '');
-              const res = await fetch('/api/admin/audits?limit=' + auditLimit + '&offset=' + auditOffset + '&q=' + q);
-              const data = await res.json();
-              auditExport.href = '/api/admin/audits/export?download=1&limit=' + auditLimit + '&offset=' + auditOffset + '&q=' + q;
-              auditMeta.textContent = 'Showing ' + data.items.length + ' rows starting at offset ' + data.offset + '. Next offset: ' + data.nextOffset + '. Refreshed ' + new Date().toLocaleString() + '.';
-              auditList.innerHTML = data.items.map(function(item) {
-                return '<button type="button" class="kv" data-audit-id="' + item.id + '" style="text-align:left;width:100%;"><div><strong>' + escapeHtml(item.action) + '</strong><div class="muted">' + escapeHtml(item.details) + '</div><div class="muted">Created ' + item.createdAt + '</div></div><span class="muted">#' + item.id + '</span></button>';
-              }).join('') || '<div class="kv"><span>Audit log</span><span class="muted">No rows for this page.</span></div>';
-              auditList.querySelectorAll('[data-audit-id]').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                  loadAuditDetail(parseInt(btn.getAttribute('data-audit-id') || '0', 10));
-                });
-              });
-              auditPrev.disabled = auditOffset === 0;
-              auditNext.disabled = !data.hasMore;
-              auditPrev.style.opacity = auditPrev.disabled ? '.5' : '1';
-              auditNext.style.opacity = auditNext.disabled ? '.5' : '1';
-              auditPrev.dataset.offset = String(Math.max(0, auditOffset - auditLimit));
-              auditNext.dataset.offset = String(data.nextOffset);
-              if (!auditSelectedId && data.items.length) {
-                loadAuditDetail(data.items[0].id);
-              }
-            }
-            auditPrev.addEventListener('click', function() {
-              auditOffset = parseInt(auditPrev.dataset.offset || '0', 10);
-              loadAudits();
-            });
-            auditNext.addEventListener('click', function() {
-              auditOffset = parseInt(auditNext.dataset.offset || '0', 10);
-              loadAudits();
-            });
-            auditQ.addEventListener('change', function() {
-              auditOffset = 0;
-              loadAudits();
-            });
-            function syncAuditTimer() {
-              if (auditTimer) {
-                clearInterval(auditTimer);
-                auditTimer = null;
-              }
-              if (auditAuto.checked) {
-                auditTimer = setInterval(loadAudits, 30000);
-              }
-            }
-            auditAuto.addEventListener('change', syncAuditTimer);
-            loadAudits();
-            syncAuditTimer();
-          }
+    function formatTime(value) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+      return new Date(seconds * 1000).toLocaleString();
+    }
 
-          const manifestsList = document.getElementById('manifests-api-list');
-          const manifestsMeta = document.getElementById('manifests-meta');
-          const manifestsDetail = document.getElementById('manifests-detail-json');
-          const manifestsDeleteForm = document.getElementById('manifest-delete-form');
-          const manifestsDeleteId = document.getElementById('manifest-delete-id');
-          const manifestsDeleteButton = document.getElementById('manifest-delete-button');
-          const manifestsExport = document.getElementById('manifests-export');
-          const manifestsPrev = document.getElementById('manifests-prev');
-          const manifestsNext = document.getElementById('manifests-next');
-          const manifestsQ = document.getElementById('manifests-q');
-          const manifestsAuto = document.getElementById('manifests-auto');
-          if (manifestsList && manifestsMeta && manifestsDetail && manifestsDeleteForm && manifestsDeleteId && manifestsDeleteButton && manifestsExport && manifestsPrev && manifestsNext && manifestsQ && manifestsAuto) {
-            let manifestsLimit = 5;
-            let manifestsOffset = 0;
-            let manifestsTimer = null;
-            let manifestsSelectedId = 0;
-            function escapeHtml(s) {
-              return String(s).replace(/[&<>"]/g, function(c) {
-                return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
-              });
-            }
-            async function loadManifestDetail(id) {
-              manifestsSelectedId = id;
-              const res = await fetch('/api/admin/import-manifests/detail?id=' + id);
-              const data = await res.json();
-              manifestsDeleteId.value = String(id);
-              manifestsDeleteButton.disabled = false;
-              manifestsDetail.textContent = JSON.stringify(data.manifest, null, 2);
-            }
-            async function deleteSelectedManifest() {
-              if (!manifestsSelectedId) return;
-              const formData = new FormData(manifestsDeleteForm);
-              const res = await fetch(manifestsDeleteForm.action, {
-                method: 'POST',
-                body: formData,
-              });
-              if (!res.ok) {
-                const text = await res.text();
-                manifestsDetail.textContent = text;
-                return;
-              }
-              manifestsSelectedId = 0;
-              manifestsDeleteId.value = '';
-              manifestsDeleteButton.disabled = true;
-              manifestsDetail.textContent = JSON.stringify(await res.json(), null, 2);
-              await loadManifests();
-            }
-            async function loadManifests() {
-              const q = encodeURIComponent(manifestsQ.value || '');
-              const res = await fetch('/api/admin/import-manifests/list?limit=' + manifestsLimit + '&offset=' + manifestsOffset + '&q=' + q);
-              const data = await res.json();
-              manifestsExport.href = '/api/admin/import-manifests/export?download=1&limit=' + manifestsLimit + '&offset=' + manifestsOffset + '&q=' + q;
-              manifestsMeta.textContent = 'Showing ' + data.items.length + ' rows starting at offset ' + data.offset + '. Next offset: ' + data.nextOffset + '. Refreshed ' + new Date().toLocaleString() + '.';
-              manifestsList.innerHTML = data.items.map(function(item) {
-                return '<button type="button" class="kv" data-manifest-id="' + item.id + '" style="text-align:left;width:100%;"><div><strong>' + escapeHtml(item.name) + '</strong><div class="muted">Approved by ' + escapeHtml(item.approvedBy) + ' · ' + escapeHtml(item.baseDir) + '</div><div class="muted">Checksum ' + escapeHtml(item.previewChecksum) + '</div><div class="muted">Bytes ' + item.totalBytes + ' · Created ' + item.createdAt + '</div></div><span class="muted">#' + item.id + '</span></button>';
-              }).join('') || '<div class="kv"><span>Import manifests</span><span class="muted">No rows for this page.</span></div>';
-              manifestsList.querySelectorAll('[data-manifest-id]').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                  loadManifestDetail(parseInt(btn.getAttribute('data-manifest-id') || '0', 10));
-                });
-              });
-              manifestsPrev.disabled = manifestsOffset === 0;
-              manifestsNext.disabled = !data.hasMore;
-              manifestsPrev.style.opacity = manifestsPrev.disabled ? '.5' : '1';
-              manifestsNext.style.opacity = manifestsNext.disabled ? '.5' : '1';
-              manifestsPrev.dataset.offset = String(Math.max(0, manifestsOffset - manifestsLimit));
-              manifestsNext.dataset.offset = String(data.nextOffset);
-              if (!manifestsSelectedId && data.items.length) {
-                loadManifestDetail(data.items[0].id);
-              }
-              if (!data.items.length) {
-                manifestsSelectedId = 0;
-                manifestsDeleteId.value = '';
-                manifestsDeleteButton.disabled = true;
-              }
-            }
-            manifestsPrev.addEventListener('click', function() {
-              manifestsOffset = parseInt(manifestsPrev.dataset.offset || '0', 10);
-              loadManifests();
-            });
-            manifestsNext.addEventListener('click', function() {
-              manifestsOffset = parseInt(manifestsNext.dataset.offset || '0', 10);
-              loadManifests();
-            });
-            manifestsQ.addEventListener('change', function() {
-              manifestsOffset = 0;
-              loadManifests();
-            });
-            function syncManifestsTimer() {
-              if (manifestsTimer) {
-                clearInterval(manifestsTimer);
-                manifestsTimer = null;
-              }
-              if (manifestsAuto.checked) {
-                manifestsTimer = setInterval(loadManifests, 30000);
-              }
-            }
-            manifestsAuto.addEventListener('change', syncManifestsTimer);
-            loadManifests();
-            syncManifestsTimer();
-          }
+    function setTag(element, label, tone) {
+      if (!element) return;
+      element.textContent = label;
+      element.className = 'tag' + (tone ? ' ' + TONES[tone] : '');
+    }
 
-          const form = document.getElementById('manifest-preview-form');
-          const out = document.getElementById('manifest-preview-json');
-          const copyBtn = document.getElementById('manifest-preview-copy');
-          let latestJson = '';
-          if (!form || !out || !copyBtn) return;
-          async function submitDeleteForm(formEl, confirmMessage, onSuccess) {
-            if (confirmMessage && !window.confirm(confirmMessage)) {
-              return;
-            }
-            const response = await fetch(formEl.action, {
-              method: 'POST',
-              body: new FormData(formEl),
-            });
-            const text = await response.text();
-            if (!response.ok) {
-              throw new Error(text || 'delete failed');
-            }
-            if (onSuccess) {
-              onSuccess(text);
-            }
+    function setResult(element, message, tone) {
+      if (!element) return;
+      element.textContent = message;
+      element.className = 'result-line' + (tone ? ' is-' + tone : '');
+    }
+
+    async function fetchJSON(url, options) {
+      const response = await fetch(url, options);
+      const text = await response.text();
+      let payload = null;
+      if (text) {
+        try { payload = JSON.parse(text); } catch (err) { payload = null; }
+      }
+      return { ok: response.ok, status: response.status, text: text, data: payload };
+    }
+
+    /* Shared 30s tick so every auto-refresh control costs one timer. */
+    const tickers = [];
+    function every(ms, run) {
+      const entry = { ms: ms, run: run, timer: null };
+      tickers.push(entry);
+      entry.timer = setInterval(run, ms);
+      return entry;
+    }
+    function restartTicker(entry) {
+      if (entry.timer) clearInterval(entry.timer);
+      entry.timer = entry.enabled === false ? null : setInterval(entry.run, entry.ms);
+    }
+
+    /* ----------------------------------------------------- section routing */
+    const tabs = Array.prototype.slice.call(document.querySelectorAll('.admin-tabs a[data-tab]'));
+    const panels = Array.prototype.slice.call(document.querySelectorAll('.admin-panel[data-panel]'));
+    const STORED_PANEL = 'wptp.admin.panel';
+
+    function showPanel(id, push) {
+      const target = panels.filter(function(panel) { return panel.dataset.panel === id; })[0];
+      const active = target || panels[0];
+      if (!active) return;
+      panels.forEach(function(panel) { panel.hidden = panel !== active; });
+      tabs.forEach(function(tab) {
+        const current = tab.dataset.tab === active.dataset.panel;
+        if (current) {
+          tab.setAttribute('aria-current', 'true');
+        } else {
+          tab.removeAttribute('aria-current');
+        }
+      });
+      try { sessionStorage.setItem(STORED_PANEL, active.dataset.panel); } catch (err) { /* storage is optional */ }
+      if (push && window.location.hash.slice(1) !== active.id) {
+        window.history.replaceState(null, '', '#' + active.id);
+      }
+    }
+
+    function panelFor(hash) {
+      const id = (hash || '').replace(/^#/, '');
+      if (!id) return '';
+      const match = panels.filter(function(panel) { return panel.id === id; })[0];
+      if (match) return match.dataset.panel;
+      const target = document.getElementById(id);
+      const owner = target ? target.closest('.admin-panel[data-panel]') : null;
+      return owner ? owner.dataset.panel : '';
+    }
+
+    tabs.forEach(function(tab) {
+      tab.addEventListener('click', function() {
+        showPanel(tab.dataset.tab, true);
+      });
+    });
+    window.addEventListener('hashchange', function() {
+      const hash = window.location.hash.slice(1);
+      const id = panelFor(window.location.hash);
+      showPanel(id, false);
+      const node = hash ? document.getElementById(hash) : null;
+      const active = panels.filter(function(panel) { return panel.dataset.panel === id; })[0];
+      if (node && node !== active) node.scrollIntoView({ block: 'start' });
+    });
+    (function initialRoute() {
+      const stored = (function() { try { return sessionStorage.getItem(STORED_PANEL) || ''; } catch (err) { return ''; } })();
+      showPanel(panelFor(window.location.hash) || stored, false);
+    })();
+
+    /* ------------------------------------------------- destructive actions */
+    /* Row actions share one form per record and differ by formaction, so a
+       confirmed action is posted to the trigger's own URL. form.submit() would
+       drop formaction and silently hit the form's default action instead. */
+    document.addEventListener('submit', function(event) {
+      const form = event.target;
+      const trigger = event.submitter;
+      const message = trigger && trigger.getAttribute('data-confirm');
+      if (!message) return;
+      event.preventDefault();
+      if (!window.confirm(message)) return;
+      const url = trigger.getAttribute('formaction') || form.action;
+      fetch(url, { method: 'POST', body: new FormData(form) }).then(function(response) {
+        if (!response.ok) {
+          window.alert(response.status === 409 || response.status === 400
+            ? 'The record could not be removed. It may still be referenced.'
+            : 'The request failed with status ' + response.status + '.');
+          return;
+        }
+        const managed = form.closest('tbody[data-managed]');
+        if (managed) {
+          reloadTables();
+        } else {
+          window.location.reload();
+        }
+      }).catch(function() {
+        window.alert('The request could not be sent.');
+      });
+    });
+
+    /* -------------------------------------------------------- status strip */
+    const statusStats = document.getElementById('status-stats');
+    const statusMeta = document.getElementById('status-meta');
+    const statusHealth = document.getElementById('status-health');
+    const statusSession = document.getElementById('status-session');
+    const statusLogin = document.getElementById('status-login');
+    const statusLogout = document.getElementById('status-logout');
+    const statusRefresh = document.getElementById('status-refresh');
+    const statusAuto = document.getElementById('status-auto');
+    const stepStates = {
+      download: document.getElementById('workflow-download-state'),
+      validate: document.getElementById('workflow-validate-state'),
+      load: document.getElementById('workflow-load-state'),
+    };
+    const workflow = { download: 'Ready', validate: 'Awaiting file', load: 'Ready when validated' };
+    const workflowTones = { download: '', validate: '', load: '' };
+
+    function setStep(key, label, tone) {
+      workflow[key] = label;
+      workflowTones[key] = tone || '';
+      setTag(stepStates[key], label, tone);
+    }
+
+    function renderStatus(data) {
+      const counts = [
+        ['Transfer client', data.aria2 && data.aria2.installed ? 'Ready' : 'Missing', data.aria2 && data.aria2.installed ? 'ok' : 'warn'],
+        ['Active catalog', data.catalogName || 'Unnamed', data.catalogHealthy ? 'ok' : 'error'],
+        ['Recovery sources', String(data.catalogSourceCount || 0), ''],
+        ['Tor mode', (data.settings && data.settings.torMode) || 'off', data.settings && data.settings.torEnabled ? 'ok' : 'muted'],
+        ['Import sources', String(data.importSourceCount || 0), ''],
+        ['Import runs', String(data.importRunCount || 0), ''],
+        ['Manifests', String(data.importManifestTotalCount || 0), ''],
+        ['Audit rows', String(data.auditCount || 0), ''],
+      ];
+      statusStats.innerHTML = counts.map(function(item) {
+        return '<div class="stat"><div class="k">' + escapeHtml(item[0]) + '</div><div class="v" title="' + escapeHtml(item[1]) + '">' + escapeHtml(item[1]) + '</div></div>';
+      }).join('');
+
+      statusMeta.textContent = (data.catalogName || 'Configured catalog') +
+        (data.catalogPath ? ' · ' + data.catalogPath : '') +
+        ' · revision ' + (data.catalogRevision || 0) +
+        ' · ' + (data.version || 'dev');
+
+      statusHealth.innerHTML = [
+        healthTag('Catalog DB', data.catalogHealthy ? 'healthy' : 'degraded', data.catalogHealthy ? 'ok' : 'error'),
+        healthTag('State DB', data.stateHealthy ? 'healthy' : 'degraded', data.stateHealthy ? 'ok' : 'error'),
+        healthTag('Transfer client', data.aria2 && data.aria2.installed ? 'aria2c detected' : 'aria2c not detected', data.aria2 && data.aria2.installed ? 'ok' : 'warn'),
+      ].join('');
+
+      statusSession.textContent = (data.adminSessionEpoch || 0) + ' · scoped to this device';
+      statusLogin.textContent = data.lastLoginAt ? formatTime(data.lastLoginAt) : 'No sign-in audit recorded yet.';
+      statusLogout.textContent = data.lastLogoutAt ? formatTime(data.lastLogoutAt) : 'No sign-out audit recorded yet.';
+      refreshTabCounts(data);
+
+      const sourceCount = data.catalogSourceCount || 0;
+      const recoveryLoaded = Boolean(data.catalogHealthy) && data.catalogName && data.catalogName !== 'Configured catalog';
+      if (stepStates.validate && workflowTones.validate === '') {
+        setStep('validate', sourceCount ? 'Source registered' : 'Awaiting file', sourceCount ? 'ok' : '');
+      }
+      if (stepStates.load && workflowTones.load === '') {
+        setStep('load', recoveryLoaded ? 'Loaded' : 'Ready when validated', recoveryLoaded ? 'ok' : '');
+      }
+    }
+
+    function healthTag(label, value, tone) {
+      return '<span class="tag ' + (TONES[tone] || '') + '">' + escapeHtml(label) + ': ' + escapeHtml(value) + '</span>';
+    }
+
+    if (statusStats && statusRefresh && statusAuto) {
+      const statusTicker = { ms: REFRESH_MS, run: loadStatus, timer: null, enabled: true };
+      tickers.push(statusTicker);
+      async function loadStatus() {
+        try {
+          const result = await fetchJSON('/api/admin/status');
+          if (!result.ok) throw new Error(result.text || 'status request failed');
+          renderStatus(result.data);
+        } catch (err) {
+          setTag(document.getElementById('admin-transfer-state'), 'Unavailable', 'error');
+        }
+      }
+      statusRefresh.addEventListener('click', loadStatus);
+      statusAuto.addEventListener('change', function() {
+        statusTicker.enabled = statusAuto.checked;
+        restartTicker(statusTicker);
+      });
+      loadStatus();
+    }
+
+    /* --------------------------------------------------------- paged tables */
+    /* One controller per record type. The server renders the first rows so the
+       tables still work without JavaScript; this adds paging, filtering,
+       auto-refresh, export links, and an inline record inspector. */
+    function attachTable(config) {
+      const body = document.getElementById(config.body);
+      if (!body) return null;
+      const meta = document.getElementById(config.meta);
+      const filter = document.getElementById(config.filter);
+      const auto = document.getElementById(config.auto);
+      const exportLink = document.getElementById(config.exportLink);
+      const prev = config.pager ? document.getElementById(config.pager.prev) : null;
+      const next = config.pager ? document.getElementById(config.pager.next) : null;
+      const table = { limit: config.limit || 10, offset: 0, selectedId: 0 };
+      const ticker = { ms: REFRESH_MS, run: load, timer: null, enabled: auto ? auto.checked : false };
+      if (auto) tickers.push(ticker);
+      /* Marks the tbody as progressively enhanced, so a confirmed row action
+         can refresh this table in place instead of reloading the page. */
+      body.setAttribute('data-managed', 'true');
+
+      function query() {
+        return filter && filter.value ? filter.value.trim() : '';
+      }
+
+      function syncExport() {
+        if (!exportLink) return;
+        exportLink.href = config.exportURL + '?download=1&limit=' + table.limit + '&offset=' + table.offset + '&q=' + encodeURIComponent(query());
+      }
+
+      function renderRows(items) {
+        body.innerHTML = items.length
+          ? items.map(config.renderRow).join('')
+          : '<tr class="row-empty"><td colspan="' + (config.columns || 1) + '">' + escapeHtml(config.empty || 'No rows for this page.') + '</td></tr>';
+        body.querySelectorAll('[data-select-id]').forEach(function(button) {
+          button.addEventListener('click', function() {
+            const id = Number(button.getAttribute('data-select-id'));
+            toggleDetail(id, button.closest('tr'));
+          });
+        });
+      }
+
+      async function toggleDetail(id, row) {
+        if (table.selectedId === id) {
+          table.selectedId = 0;
+          const existing = body.querySelector('.row-detail');
+          if (existing) existing.remove();
+          body.querySelectorAll('[aria-selected="true"]').forEach(function(node) { node.removeAttribute('aria-selected'); });
+          return;
+        }
+        body.querySelectorAll('.row-detail').forEach(function(node) { node.remove(); });
+        body.querySelectorAll('[aria-selected="true"]').forEach(function(node) { node.removeAttribute('aria-selected'); });
+        table.selectedId = id;
+        row.setAttribute('aria-selected', 'true');
+        const detail = document.createElement('tr');
+        detail.className = 'row-detail';
+        const cell = document.createElement('td');
+        cell.colSpan = config.columns || 1;
+        const pre = document.createElement('pre');
+        pre.textContent = 'Loading…';
+        cell.appendChild(pre);
+        detail.appendChild(cell);
+        row.after(detail);
+        try {
+          const result = await fetchJSON(config.detail + '?id=' + id);
+          pre.textContent = result.ok && result.data
+            ? JSON.stringify(result.data[config.detailKey] || result.data, null, 2)
+            : (result.text || 'Unable to load this record.');
+        } catch (err) {
+          pre.textContent = 'Unable to load this record.';
+        }
+      }
+
+      async function load() {
+        const params = 'limit=' + table.limit + '&offset=' + table.offset + '&q=' + encodeURIComponent(query());
+        try {
+          const result = await fetchJSON(config.list + '?' + params);
+          if (!result.ok || !result.data) throw new Error(result.text || 'request failed');
+          const items = result.data.items || [];
+          renderRows(items);
+          if (meta) {
+            meta.textContent = items.length
+              ? 'Rows ' + (result.data.offset + 1) + '–' + (result.data.offset + items.length) + ' · next offset ' + result.data.nextOffset + ' · updated ' + new Date().toLocaleTimeString()
+              : 'No rows for this page · updated ' + new Date().toLocaleTimeString();
           }
-          document.querySelectorAll('form[action="/api/admin/import-sources/delete"]').forEach(function(formEl) {
-            formEl.addEventListener('submit', async function(ev) {
-              ev.preventDefault();
-              try {
-                await submitDeleteForm(formEl, 'Delete this import source?', function() {
-                  window.location.reload();
-                });
-              } catch (err) {
-                window.alert(String(err.message || err));
-              }
-            });
-          });
-          document.querySelectorAll('form[action="/api/admin/import-runs/delete"]').forEach(function(formEl) {
-            formEl.addEventListener('submit', async function(ev) {
-              ev.preventDefault();
-              try {
-                await submitDeleteForm(formEl, 'Delete this import run?', function() {
-                  window.location.reload();
-                });
-              } catch (err) {
-                window.alert(String(err.message || err));
-              }
-            });
-          });
-          manifestsDeleteForm.addEventListener('submit', async function(ev) {
-            ev.preventDefault();
-            if (!window.confirm('Delete this manifest record?')) {
-              return;
-            }
-            try {
-              await deleteSelectedManifest();
-            } catch (err) {
-              window.alert(String(err.message || err));
-            }
-          });
-          document.querySelectorAll('form[action="/api/admin/audits/delete"]').forEach(function(formEl) {
-            formEl.addEventListener('submit', async function(ev) {
-              ev.preventDefault();
-              try {
-                await submitDeleteForm(formEl, 'Delete this audit entry?', function() {
-                  window.location.reload();
-                });
-              } catch (err) {
-                window.alert(String(err.message || err));
-              }
-            });
-          });
-          copyBtn.addEventListener('click', async function() {
-            if (!latestJson) return;
-            try {
-              await navigator.clipboard.writeText(latestJson);
-              copyBtn.textContent = 'Copied';
-              setTimeout(function() { copyBtn.textContent = 'Copy JSON'; }, 1200);
-            } catch (err) {
-              copyBtn.textContent = 'Copy failed';
-            }
-          });
-          form.addEventListener('submit', async function(ev) {
-            ev.preventDefault();
-            const response = await fetch(form.action, {
-              method: 'POST',
-              body: new FormData(form),
-            });
-            const text = await response.text();
-            if (!response.ok) {
-              out.textContent = text;
-              latestJson = '';
-              return;
-            }
-            try {
-              latestJson = JSON.stringify(JSON.parse(text), null, 2);
-              out.textContent = latestJson;
-            } catch (err) {
-              out.textContent = text;
-              latestJson = text;
-            }
-          });
-          const catalogLoadForm = document.getElementById('catalog-load-form');
-          const catalogLoadSource = document.getElementById('catalog-load-source');
-          const catalogLoadPath = document.getElementById('catalog-load-path');
-          const catalogLoadStatus = document.getElementById('catalog-load-status');
-          if (catalogLoadForm && catalogLoadSource && catalogLoadPath && catalogLoadStatus) {
-            catalogLoadSource.addEventListener('change', function() {
-              if (catalogLoadSource.value) {
-                catalogLoadPath.value = '';
-                catalogLoadStatus.textContent = 'Configured source selected; its saved local path will be used.';
-              }
-            });
-            catalogLoadPath.addEventListener('input', function() {
-              if (catalogLoadPath.value.trim()) {
-                catalogLoadSource.value = '';
-              }
-            });
-            catalogLoadForm.addEventListener('submit', async function(event) {
-              event.preventDefault();
-              setWorkflowState(workflowLoadState, 'Loading', 'is-active');
-              catalogLoadStatus.textContent = 'Validating and loading catalog...';
-              const response = await fetch(catalogLoadForm.action, { method: 'POST', body: new FormData(catalogLoadForm) });
-              const text = await response.text();
-              if (!response.ok) {
-                catalogLoadStatus.textContent = text;
-                setWorkflowState(workflowLoadState, 'Load failed', 'is-error');
-                return;
-              }
-              try {
-                const data = JSON.parse(text);
-                catalogLoadStatus.textContent = 'Loaded ' + (data.source && data.source.name ? data.source.name : 'catalog') + '. Catalog searches now use the recovered database.';
-                setWorkflowState(workflowLoadState, 'Loaded', 'is-ready');
-              } catch (error) {
-                catalogLoadStatus.textContent = 'Catalog loaded.';
-                setWorkflowState(workflowLoadState, 'Loaded', 'is-ready');
-              }
-            });
+          if (prev) {
+            prev.disabled = table.offset === 0;
+            prev.dataset.offset = String(Math.max(0, table.offset - table.limit));
           }
-          const magnetForm = document.getElementById('magnet-download-form');
-          const magnetStatus = document.getElementById('magnet-download-status');
-          const magnetList = document.getElementById('magnet-download-list');
-          if (magnetForm && magnetStatus && magnetList) {
-            const catalogPreset = document.getElementById('catalog-preset');
-            const catalogPresetDescription = document.getElementById('catalog-preset-description');
-            const catalogPresetApproval = document.getElementById('catalog-preset-approval');
-            const catalogPresetApprove = document.getElementById('catalog-preset-approve');
-            const magnetInput = document.getElementById('magnet-download-input');
-            const magnetSubmit = document.getElementById('magnet-download-submit');
-            const syncCatalogPreset = function() {
-              const option = catalogPreset && catalogPreset.selectedOptions[0];
-              const selected = Boolean(option && option.value);
-              const magnet = selected ? (option.dataset.presetMagnet || '') : '';
-              if (selected && magnet) magnetInput.value = magnet;
-              if (catalogPresetDescription) {
-                catalogPresetDescription.textContent = selected
-                  ? (option.dataset.presetDescription || '') + (magnet ? ' This profile is ready to approve.' : ' This profile needs an authorized magnet or local catalog before approval.')
-                  : 'Select a profile to see its recovery requirements.';
-              }
-              if (catalogPresetApproval) catalogPresetApproval.hidden = !selected;
-              if (catalogPresetApprove) {
-                catalogPresetApprove.required = selected;
-                if (!selected) catalogPresetApprove.checked = false;
-              }
-              if (magnetSubmit) magnetSubmit.textContent = selected ? 'Approve and Start Recovery' : 'Download';
-            };
-            if (catalogPreset) {
-              catalogPreset.addEventListener('change', syncCatalogPreset);
-              syncCatalogPreset();
-            }
-            const escapeMagnet = function(value) {
-              return String(value).replace(/[&<>"]/g, function(c) {
-                return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
-              });
-            };
-            const loadMagnets = async function() {
-              const response = await fetch('/api/admin/import-references/list');
-              if (!response.ok) return;
-              const data = await response.json();
-              const items = data.items || [];
-              const active = items.some(function(item) {
-                return item.downloadStatus === 'started' || item.downloadStatus === 'running' || item.recoveryStatus === 'recovering' || item.recoveryStatus === 'extracting' || item.recoveryStatus === 'validating' || item.recoveryStatus === 'loading';
-              });
-              const failed = items.some(function(item) { return item.downloadError || item.recoveryError || item.downloadStatus === 'error' || item.recoveryStatus === 'failed'; });
-              const loaded = items.some(function(item) { return item.recoveryStatus === 'loaded'; });
-              const recovering = items.some(function(item) { return item.recoveryStatus === 'recovering' || item.recoveryStatus === 'extracting' || item.recoveryStatus === 'validating' || item.recoveryStatus === 'loading'; });
-              const recorded = items.some(function(item) { return !item.downloadStatus; });
-              setWorkflowState(workflowDownloadState, recovering ? 'Recovering' : (active ? 'In progress' : (failed ? 'Attention' : (loaded ? 'Loaded' : (recorded ? 'Recorded' : (items.length ? 'Submitted' : 'Ready'))))), active ? 'is-active' : (failed ? 'is-error' : (items.length ? 'is-ready' : '')));
-              if (loaded) {
-                setWorkflowState(workflowValidateState, 'Validated', 'is-ready');
-                setWorkflowState(workflowLoadState, 'Loaded', 'is-ready');
-              } else if (recovering) {
-                setWorkflowState(workflowValidateState, 'Processing', 'is-active');
-                setWorkflowState(workflowLoadState, 'Processing', 'is-active');
-              } else if (failed) {
-                setWorkflowState(workflowValidateState, 'Needs attention', 'is-error');
-                setWorkflowState(workflowLoadState, 'Blocked', 'is-error');
-              }
-              magnetList.innerHTML = items.map(function(item) {
-                const rawStatus = item.downloadStatus || 'recorded';
-                const status = rawStatus === 'recorded' ? 'Recorded' : (rawStatus === 'started' || rawStatus === 'running' ? 'In progress' : rawStatus);
-                const recoveryStatus = item.recoveryStatus ? 'Recovery: ' + item.recoveryStatus : '';
-                const detail = item.downloadError || item.recoveryError ? ' · ' + (item.downloadError || item.recoveryError) : '';
-                const tone = item.downloadError || item.recoveryError || rawStatus === 'error' || item.recoveryStatus === 'failed' ? 'is-error' : (item.recoveryStatus === 'recovering' || item.recoveryStatus === 'extracting' || item.recoveryStatus === 'validating' || item.recoveryStatus === 'loading' || rawStatus === 'started' || rawStatus === 'running' ? 'is-active' : 'is-ready');
-                const directory = item.downloadDir ? '<div class="muted">Saving to ' + escapeMagnet(item.downloadDir) + '</div>' : '';
-                const recovered = item.recoveredPath ? '<div class="muted">Loaded catalog: ' + escapeMagnet(item.recoveredPath) + '</div>' : '';
-                const labels = [status, recoveryStatus].filter(function(value) { return value !== ''; }).join(' · ');
-                return '<div class="kv download-item"><div class="download-meta"><strong>' + escapeMagnet(item.kind) + '</strong><div class="muted">' + escapeMagnet(item.name || item.infoHash || item.reference) + '</div><div class="muted magnet-link">' + escapeMagnet(item.reference) + '</div>' + directory + recovered + '</div><span class="workflow-state download-status ' + tone + '">' + escapeMagnet(labels + detail) + '</span></div>';
-              }).join('') || '<div class="kv"><span>Downloads</span><span class="muted">No magnets downloaded yet.</span></div>';
-            };
-            magnetForm.addEventListener('submit', async function(event) {
-              event.preventDefault();
-              magnetStatus.textContent = 'Starting download...';
-              const response = await fetch(magnetForm.action, { method: 'POST', body: new FormData(magnetForm) });
-              const text = await response.text();
-              if (!response.ok) {
-                magnetStatus.textContent = text;
-                return;
-              }
-              let data = {};
-              try { data = JSON.parse(text); } catch (error) {}
-              magnetForm.reset();
-              if (data.download && data.download.status === 'reused') {
-                magnetStatus.textContent = 'Existing completed download found. Recovery and catalog loading started.';
-              } else if (data.download && data.download.started) {
-                magnetStatus.textContent = 'Download started. Files are being saved to ' + data.download.directory + '.';
-              } else if (data.download && data.download.error) {
-                magnetStatus.textContent = 'Magnet saved, but download did not start: ' + data.download.error;
-              } else {
-                magnetStatus.textContent = 'Magnet saved.';
-              }
-              loadMagnets();
-            });
-            loadMagnets();
-            setInterval(loadMagnets, 10000);
+          if (next) {
+            next.disabled = !result.data.hasMore;
+            next.dataset.offset = String(result.data.nextOffset || 0);
           }
-        })();
-      </script>
-  </div>
+          syncExport();
+        } catch (err) {
+          if (meta) meta.textContent = 'This view could not be refreshed. The server-rendered rows above are still current.';
+        }
+      }
+
+      if (filter) {
+        let pending = null;
+        filter.addEventListener('input', function() {
+          if (pending) clearTimeout(pending);
+          pending = setTimeout(function() {
+            table.offset = 0;
+            table.selectedId = 0;
+            load();
+          }, 250);
+        });
+      }
+      if (prev) prev.addEventListener('click', function() {
+        table.offset = Number(prev.dataset.offset || '0');
+        load();
+      });
+      if (next) next.addEventListener('click', function() {
+        table.offset = Number(next.dataset.offset || '0');
+        load();
+      });
+      if (auto) auto.addEventListener('change', function() {
+        ticker.enabled = auto.checked;
+        restartTicker(ticker);
+      });
+      syncExport();
+      load();
+      return { reload: load, table: table };
+    }
+
+    const sourcesTable = attachTable({
+      body: 'sources-rows',
+      meta: 'sources-meta',
+      filter: 'sources-q',
+      auto: 'sources-auto',
+      pager: { prev: 'sources-prev', next: 'sources-next' },
+      exportLink: 'sources-export',
+      exportURL: '/api/admin/import-sources/export',
+      list: '/api/admin/import-sources/list',
+      detail: '/api/admin/import-sources/detail',
+      detailKey: 'source',
+      columns: 6,
+      empty: 'No import sources for this page.',
+      renderRow: function(item) {
+        const form = 'import-source-' + item.id;
+        const hidden = item.enabled ? 0 : 1;
+        const verb = item.enabled ? 'Disable' : 'Enable';
+        return '<tr data-row-id="' + item.id + '">' +
+          '<td class="cell-id">' + item.id + '</td>' +
+          '<td><div class="stack"><button type="button" class="row-select" data-select-id="' + item.id + '">' + escapeHtml(item.name) + '</button>' +
+          '<input form="' + form + '" name="location" value="' + escapeHtml(item.location) + '" aria-label="Source location" class="mono"></div></td>' +
+          '<td><input form="' + form + '" name="kind" value="' + escapeHtml(item.kind) + '" aria-label="Source kind"></td>' +
+          '<td class="nowrap muted">' + escapeHtml(formatTime(item.createdAt)) + '</td>' +
+          '<td>' + (item.enabled ? '<span class="tag is-ok">Enabled</span>' : '<span class="tag is-muted">Disabled</span>') + '</td>' +
+          '<td class="cell-actions"><form id="' + form + '" method="post" action="/api/admin/import-sources/update">' +
+          '<input type="hidden" name="id" value="' + item.id + '">' +
+          '<input type="hidden" name="name" value="' + escapeHtml(item.name) + '">' +
+          '<button type="submit" class="btn-sm">Save</button>' +
+          '<input type="hidden" name="enabled" value="' + hidden + '">' +
+          '<button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/import-sources/toggle">' + verb + '</button>' +
+          '<button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/import-sources/delete" data-confirm="Delete this import source?">Delete</button>' +
+          '</form></td></tr>';
+      },
+    });
+
+    const runsTable = attachTable({
+      body: 'runs-rows',
+      meta: 'runs-meta',
+      filter: 'runs-q',
+      auto: 'runs-auto',
+      pager: { prev: 'runs-prev', next: 'runs-next' },
+      exportLink: 'runs-export',
+      exportURL: '/api/admin/import-runs/export',
+      list: '/api/admin/import-runs/list',
+      detail: '/api/admin/import-runs/detail',
+      detailKey: 'run',
+      columns: 6,
+      empty: 'No import runs for this page.',
+      renderRow: function(item) {
+        const form = 'import-run-' + item.id;
+        return '<tr data-row-id="' + item.id + '">' +
+          '<td class="cell-id">' + item.id + '</td>' +
+          '<td><div class="stack"><button type="button" class="row-select" data-select-id="' + item.id + '">Run #' + item.id + '</button>' +
+          '<span class="muted mono">' + escapeHtml(item.approvedRef) + '</span></div></td>' +
+          '<td><input form="' + form + '" name="status" value="' + escapeHtml(item.status) + '" aria-label="Run status"></td>' +
+          '<td><input form="' + form + '" name="message" value="' + escapeHtml(item.message) + '" aria-label="Run message"></td>' +
+          '<td class="nowrap muted">' + escapeHtml(formatTime(item.startedAt)) + '</td>' +
+          '<td class="cell-actions"><form id="' + form + '" method="post" action="/api/admin/import-runs/finish">' +
+          '<input type="hidden" name="id" value="' + item.id + '">' +
+          '<button type="submit" class="btn-sm">Update</button>' +
+          '<button type="submit" class="btn-sm btn-quiet" formaction="/api/admin/import-runs/delete" data-confirm="Delete this import run?">Delete</button>' +
+          '</form></td></tr>';
+      },
+    });
+
+    const manifestsTable = attachTable({
+      body: 'manifests-rows',
+      meta: 'manifests-meta',
+      filter: 'manifests-q',
+      auto: 'manifests-auto',
+      pager: { prev: 'manifests-prev', next: 'manifests-next' },
+      exportLink: 'manifests-export',
+      exportURL: '/api/admin/import-manifests/export',
+      list: '/api/admin/import-manifests/list',
+      detail: '/api/admin/import-manifests/detail',
+      detailKey: 'manifest',
+      columns: 7,
+      empty: 'No manifests for this page.',
+      renderRow: function(item) {
+        return '<tr data-row-id="' + item.id + '">' +
+          '<td class="cell-id">' + item.id + '</td>' +
+          '<td><button type="button" class="row-select" data-select-id="' + item.id + '">' + escapeHtml(item.name) + '</button></td>' +
+          '<td class="muted">' + escapeHtml(item.approvedBy) + '</td>' +
+          '<td class="mono">' + escapeHtml(item.baseDir) + '</td>' +
+          '<td class="mono">' + escapeHtml(item.previewChecksum) + '</td>' +
+          '<td class="cell-num">' + escapeHtml(item.totalBytes) + '</td>' +
+          '<td class="cell-actions"><form id="import-manifest-' + item.id + '" method="post" action="/api/admin/import-manifests/delete">' +
+          '<input type="hidden" name="id" value="' + item.id + '">' +
+          '<button type="submit" class="btn-sm btn-quiet" data-confirm="Delete this manifest record?">Delete</button>' +
+          '</form></td></tr>';
+      },
+    });
+
+    const auditTable = attachTable({
+      body: 'audit-rows',
+      meta: 'audit-meta',
+      filter: 'audit-q',
+      auto: 'audit-auto',
+      pager: { prev: 'audit-prev', next: 'audit-next' },
+      exportLink: 'audit-export',
+      exportURL: '/api/admin/audits/export',
+      list: '/api/admin/audits',
+      detail: '/api/admin/audits/detail',
+      detailKey: 'audit',
+      columns: 5,
+      empty: 'No audit rows for this page.',
+      renderRow: function(item) {
+        return '<tr data-row-id="' + item.id + '">' +
+          '<td class="cell-id">' + item.id + '</td>' +
+          '<td><button type="button" class="row-select" data-select-id="' + item.id + '">' + escapeHtml(item.action) + '</button></td>' +
+          '<td class="muted">' + escapeHtml(item.details) + '</td>' +
+          '<td class="nowrap muted">' + escapeHtml(formatTime(item.createdAt)) + '</td>' +
+          '<td class="cell-actions"><form id="audit-' + item.id + '" method="post" action="/api/admin/audits/delete">' +
+          '<input type="hidden" name="id" value="' + item.id + '">' +
+          '<button type="submit" class="btn-sm btn-quiet" data-confirm="Delete this audit entry?">Delete</button>' +
+          '</form></td></tr>';
+      },
+    });
+
+    /* Any state change writes audit rows, so refresh the paged views together. */
+    const tables = [sourcesTable, runsTable, manifestsTable, auditTable].filter(Boolean);
+    function reloadTables() {
+      tables.forEach(function(entry) { entry.reload(); });
+    }
+
+    /* Keep the tab labels honest about how much state exists. Tabs without a
+       count (Recovery, Settings) keep a bare label. */    function refreshTabCounts(data) {
+      const counts = {
+        'catalog-source-admin': data.catalogSourceCount || 0,
+        'import-state': data.importSourceCount || 0,
+        'manifest-tools': data.importManifestTotalCount || 0,
+        'audit-log': data.auditCount || 0,
+      };
+      tabs.forEach(function(tab) {
+        const badge = tab.querySelector('.tab-count');
+        const total = counts[tab.dataset.tab];
+        if (total === undefined) {
+          if (badge) badge.remove();
+          return;
+        }
+        const chip = badge || document.createElement('span');
+        chip.className = 'tab-count';
+        chip.textContent = String(total);
+        if (!badge) tab.appendChild(chip);
+      });
+    }
+
+    /* ---------------------------------------------- transfers and recovery */
+    const magnetForm = document.getElementById('magnet-download-form');
+    const magnetStatus = document.getElementById('magnet-download-status');
+    const magnetList = document.getElementById('magnet-download-list');
+    const magnetMeta = document.getElementById('magnet-list-meta');
+    const magnetClientTag = document.getElementById('magnet-client-tag');
+
+    if (magnetForm && magnetStatus && magnetList) {
+      const preset = document.getElementById('catalog-preset');
+      const presetDescription = document.getElementById('catalog-preset-description');
+      const presetApproval = document.getElementById('catalog-preset-approval');
+      const presetApprove = document.getElementById('catalog-preset-approve');
+      const magnetInput = document.getElementById('magnet-download-input');
+      const magnetSubmit = document.getElementById('magnet-download-submit');
+
+      function syncPreset() {
+        const option = preset && preset.selectedOptions[0];
+        const selected = Boolean(option && option.value);
+        const magnet = selected ? (option.dataset.presetMagnet || '') : '';
+        if (selected && magnet) magnetInput.value = magnet;
+        if (presetDescription) {
+          presetDescription.textContent = selected
+            ? (option.dataset.presetDescription || '') + (magnet ? ' This profile is ready to approve.' : ' This profile needs an authorized magnet or local catalog before approval.')
+            : 'Select a profile to see its recovery requirements.';
+        }
+        if (presetApproval) presetApproval.hidden = !selected;
+        if (presetApprove) {
+          presetApprove.required = selected;
+          if (!selected) presetApprove.checked = false;
+        }
+        if (magnetSubmit) magnetSubmit.textContent = selected ? 'Approve and Start Recovery' : 'Download';
+      }
+      if (preset) {
+        preset.addEventListener('change', syncPreset);
+        syncPreset();
+      }
+
+      const BUSY = ['started', 'running', 'recovering', 'extracting', 'validating', 'loading'];
+      function itemTone(item) {
+        if (item.downloadError || item.recoveryError || item.downloadStatus === 'error' || item.recoveryStatus === 'failed') return 'error';
+        if (BUSY.indexOf(item.downloadStatus) >= 0 || BUSY.indexOf(item.recoveryStatus) >= 0) return 'warn';
+        if (item.recoveryStatus === 'loaded') return 'ok';
+        return '';
+      }
+      function itemLabel(item) {
+        const download = item.downloadStatus || 'recorded';
+        const parts = [download === 'started' || download === 'running' ? 'in progress' : download];
+        if (item.recoveryStatus) parts.push(item.recoveryStatus);
+        const detail = item.downloadError || item.recoveryError;
+        if (detail) parts.push(detail);
+        return parts.join(' · ');
+      }
+
+      async function loadMagnets() {
+        let result;
+        try {
+          result = await fetchJSON('/api/admin/import-references/list');
+        } catch (err) {
+          return;
+        }
+        if (!result.ok || !result.data) return;
+        const items = result.data.items || [];
+        magnetList.innerHTML = items.length
+          ? items.map(function(item) {
+              const name = item.name || item.infoHash || item.reference;
+              const destination = [item.downloadDir, item.recoveredPath ? 'loaded ' + item.recoveredPath : ''].filter(Boolean).join(' · ');
+              return '<tr>' +
+                '<td class="nowrap">' + escapeHtml(item.kind) + '</td>' +
+                '<td><span class="truncate" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</span></td>' +
+                '<td><span class="truncate mono" title="' + escapeHtml(item.reference) + '">' + escapeHtml(item.reference) + '</span></td>' +
+                '<td class="mono muted"><span class="truncate" title="' + escapeHtml(destination) + '">' + escapeHtml(destination || '—') + '</span></td>' +
+                '<td><span class="tag ' + (TONES[itemTone(item)] || '') + '">' + escapeHtml(itemLabel(item)) + '</span></td>' +
+                '</tr>';
+            }).join('')
+          : '<tr class="row-empty"><td colspan="5">No magnets downloaded yet.</td></tr>';
+
+        const failed = items.some(function(item) { return itemTone(item) === 'error'; });
+        const recovering = items.some(function(item) { return BUSY.indexOf(item.recoveryStatus) >= 0; });
+        const active = items.some(function(item) { return item.downloadStatus === 'started' || item.downloadStatus === 'running'; });
+        const loaded = items.some(function(item) { return item.recoveryStatus === 'loaded'; });
+        setStep('download', recovering ? 'Recovering' : (active ? 'In progress' : (failed ? 'Attention' : (loaded ? 'Loaded' : (items.length ? 'Submitted' : 'Ready')))), recovering || active ? 'warn' : (failed ? 'error' : (items.length ? 'ok' : '')));
+        if (loaded) {
+          setStep('validate', 'Validated', 'ok');
+          setStep('load', 'Loaded', 'ok');
+        } else if (recovering) {
+          setStep('validate', 'Processing', 'warn');
+          setStep('load', 'Processing', 'warn');
+        } else if (failed) {
+          setStep('validate', 'Needs attention', 'error');
+          setStep('load', 'Blocked', 'error');
+        }
+        if (magnetMeta) magnetMeta.textContent = items.length + ' reference' + (items.length === 1 ? '' : 's') + ' · updated ' + new Date().toLocaleTimeString();
+        if (magnetClientTag) magnetClientTag.textContent = failed ? 'transfer attention' : (recovering || active ? 'transfer running' : 'aria2c dispatch');
+      }
+
+      magnetForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+        setResult(magnetStatus, 'Starting download…');
+        try {
+          const result = await fetchJSON(magnetForm.action, { method: 'POST', body: new FormData(magnetForm) });
+          if (!result.ok) {
+            setResult(magnetStatus, result.text || 'The transfer could not be started.', 'error');
+            return;
+          }
+          const data = result.data || {};
+          magnetForm.reset();
+          if (preset) preset.selectedIndex = 0;
+          syncPreset();
+          if (data.download && data.download.status === 'reused') {
+            setResult(magnetStatus, 'Existing completed download found. Recovery and catalog loading started.', 'ok');
+          } else if (data.download && data.download.started) {
+            setResult(magnetStatus, 'Download started. Files are being saved to ' + data.download.directory + '.', 'ok');
+          } else if (data.download && data.download.error) {
+            setResult(magnetStatus, 'Magnet saved, but the download did not start: ' + data.download.error, 'error');
+          } else {
+            setResult(magnetStatus, 'Magnet saved.', 'ok');
+          }
+          loadMagnets();
+        } catch (err) {
+          setResult(magnetStatus, 'The transfer could not be started.', 'error');
+        }
+      });
+
+      loadMagnets();
+      every(10000, loadMagnets);
+    }
+
+    /* -------------------------------------------------- catalog load form */
+    const loadForm = document.getElementById('catalog-load-form');
+    const loadSource = document.getElementById('catalog-load-source');
+    const loadPath = document.getElementById('catalog-load-path');
+    const loadStatus = document.getElementById('catalog-load-status');
+    if (loadForm && loadSource && loadPath && loadStatus) {
+      loadSource.addEventListener('change', function() {
+        if (loadSource.value) {
+          loadPath.value = '';
+          setResult(loadStatus, 'Configured source selected; its saved local path will be used.');
+        }
+      });
+      loadPath.addEventListener('input', function() {
+        if (loadPath.value.trim()) loadSource.value = '';
+      });
+      loadForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+        setStep('load', 'Loading', 'warn');
+        setResult(loadStatus, 'Validating and loading catalog…');
+        try {
+          const result = await fetchJSON(loadForm.action, { method: 'POST', body: new FormData(loadForm) });
+          if (!result.ok) {
+            setResult(loadStatus, result.text || 'The catalog could not be loaded.', 'error');
+            setStep('load', 'Load failed', 'error');
+            return;
+          }
+          const data = result.data || {};
+          const name = data.source && data.source.name ? data.source.name : 'catalog';
+          setResult(loadStatus, 'Loaded ' + name + '. Catalog searches now use the recovered database.', 'ok');
+          setStep('load', 'Loaded', 'ok');
+          setStep('validate', 'Validated', 'ok');
+          reloadTables();
+          if (statusAuto && statusAuto.checked) document.getElementById("status-refresh").click();
+        } catch (err) {
+          setResult(loadStatus, 'The catalog could not be loaded.', 'error');
+          setStep('load', 'Load failed', 'error');
+        }
+      });
+    }
+
+    /* ------------------------------------------------- manifest preview form */
+    const previewForm = document.getElementById('manifest-preview-form');
+    const previewOut = document.getElementById('manifest-preview-json');
+    const previewCopy = document.getElementById('manifest-preview-copy');
+    if (previewForm && previewOut) {
+      let latestJSON = '';
+      previewForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+        previewOut.textContent = 'Working…';
+        latestJSON = '';
+        try {
+          const result = await fetchJSON(previewForm.action, { method: 'POST', body: new FormData(previewForm) });
+          if (!result.ok) {
+            previewOut.textContent = result.text || 'The manifest could not be validated.';
+            return;
+          }
+          latestJSON = result.data ? JSON.stringify(result.data, null, 2) : result.text;
+          previewOut.textContent = latestJSON;
+        } catch (err) {
+          previewOut.textContent = 'The manifest could not be validated.';
+        }
+      });
+      if (previewCopy) {
+        previewCopy.addEventListener('click', async function() {
+          if (!latestJSON) return;
+          try {
+            await navigator.clipboard.writeText(latestJSON);
+            previewCopy.textContent = 'Copied';
+            setTimeout(function() { previewCopy.textContent = 'Copy JSON'; }, 1200);
+          } catch (err) {
+            previewCopy.textContent = 'Copy failed';
+            setTimeout(function() { previewCopy.textContent = 'Copy JSON'; }, 1200);
+          }
+        });
+      }
+    }
+
+  })();
+</script>
 {{end}}
