@@ -124,7 +124,7 @@ func runLoadCatalog(source string) error {
 		return err
 	}
 	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
+	defer func() { _ = os.Remove(temporaryName) }()
 	input, err := os.Open(sourceAbs)
 	if err != nil {
 		_ = temporary.Close()
@@ -184,7 +184,7 @@ func runOpen() error {
 	if err != nil {
 		return fmt.Errorf("server is not ready at %s: %w", target, err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("server health check returned %s", response.Status)
 	}

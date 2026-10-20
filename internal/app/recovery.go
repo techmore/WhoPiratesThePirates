@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"html"
 	"os"
@@ -269,9 +271,16 @@ func (a *App) recoveredCatalogCandidates(id int64, artifact string) ([]string, e
 	} else if len(existing) > 0 {
 		return existing, nil
 	}
-	command := exec.Command(a.archiveExtractor, "x", "-y", "-o"+destination, artifact)
+	// Extraction holds recoveryMu; a stuck extractor would otherwise block
+	// every later recovery until restart.
+	ctx, cancel := context.WithTimeout(context.Background(), archiveExtractTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, a.archiveExtractor, "x", "-y", "-o"+destination, artifact)
 	output, err := command.CombinedOutput()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("extract archive: timed out after %s", archiveExtractTimeout)
+		}
 		return nil, fmt.Errorf("extract archive: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	candidates, err := catalogFiles(destination)

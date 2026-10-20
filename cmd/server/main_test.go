@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -148,5 +150,93 @@ func TestLoadServiceEnvPreservesPathsWithSpaces(t *testing.T) {
 	}
 	if os.Getenv("APP_DB_PATH") != catalog {
 		t.Fatalf("expected path with spaces to load unchanged, got %q", os.Getenv("APP_DB_PATH"))
+	}
+}
+
+func TestRunDispatchesCommandsAndExitCodes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WHOP2P_HOME", home)
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{name: "help", args: []string{"help"}, wantCode: exitOK, wantStdout: "Usage:"},
+		{name: "help flag", args: []string{"--help"}, wantCode: exitOK, wantStdout: "APP_DB_PATH"},
+		{name: "short help flag", args: []string{"-h"}, wantCode: exitOK, wantStdout: "load-catalog FILE"},
+		{name: "version", args: []string{"version"}, wantCode: exitOK, wantStdout: version},
+		{name: "version flag", args: []string{"--version"}, wantCode: exitOK, wantStdout: version},
+		{name: "unknown command", args: []string{"setup2"}, wantCode: exitUsage, wantStderr: `unknown command "setup2"`},
+		{name: "serve with arguments", args: []string{"serve", "extra"}, wantCode: exitUsage, wantStderr: "serve does not take arguments"},
+		{name: "setup with arguments", args: []string{"setup", "extra"}, wantCode: exitUsage, wantStderr: "setup does not take arguments"},
+		{name: "load-catalog without file", args: []string{"load-catalog"}, wantCode: exitUsage, wantStderr: "exactly one argument"},
+		{name: "load-catalog with two files", args: []string{"load-catalog", "a", "b"}, wantCode: exitUsage, wantStderr: "exactly one argument"},
+		{name: "load-catalog missing file", args: []string{"load-catalog", filepath.Join(home, "missing.sqlite")}, wantCode: exitFailure, wantStderr: "catalog validation failed"},
+		{name: "open with arguments", args: []string{"open", "extra"}, wantCode: exitUsage, wantStderr: "open does not take arguments"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("run(%v) exit %d, want %d (stdout=%q stderr=%q)", tc.args, code, tc.wantCode, stdout.String(), stderr.String())
+			}
+			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
+				t.Fatalf("stdout %q does not contain %q", stdout.String(), tc.wantStdout)
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Fatalf("stderr %q does not contain %q", stderr.String(), tc.wantStderr)
+			}
+			if code == exitUsage && !strings.Contains(stderr.String(), "Usage:") {
+				t.Fatalf("usage error should print usage to stderr, got %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestUsageDocumentsEveryEnvironmentVariable(t *testing.T) {
+	var out bytes.Buffer
+	printUsage(&out)
+	for _, name := range []string{
+		"APP_DB_PATH", "APP_STATE_PATH", "APP_BIND_ADDR", "PORT", "ADMIN_PASSWORD", "ADMIN_SESSION_SECRET",
+		"APP_ALLOWED_HOSTS", "APP_ARIA2_PATH", "APP_ARCHIVE_EXTRACTOR", "APP_DOWNLOAD_DIR", "APP_TLS_CERT_FILE",
+		"APP_TLS_KEY_FILE", "APP_COOKIE_SECURE", "APP_ALLOW_INSECURE_HTTP", "WHOP2P_HOME", "WHOP2P_URL",
+	} {
+		if !strings.Contains(out.String(), name) {
+			t.Fatalf("usage text does not document %s", name)
+		}
+	}
+}
+
+func TestRunServeRejectsBadConfiguration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WHOP2P_HOME", home)
+	t.Setenv("APP_DB_PATH", filepath.Join(home, "missing.sqlite"))
+	t.Setenv("APP_STATE_PATH", filepath.Join(home, "state.sqlite"))
+
+	t.Setenv("PORT", "notaport")
+	if err := runServe(); err == nil || !strings.Contains(err.Error(), "invalid PORT") {
+		t.Fatalf("expected invalid PORT to be rejected, got %v", err)
+	}
+	t.Setenv("PORT", "0")
+	if err := runServe(); err == nil || !strings.Contains(err.Error(), "invalid PORT") {
+		t.Fatalf("expected PORT 0 to be rejected, got %v", err)
+	}
+
+	t.Setenv("PORT", "18099")
+	t.Setenv("APP_BIND_ADDR", "0.0.0.0")
+	t.Setenv("APP_ALLOW_INSECURE_HTTP", "")
+	if err := runServe(); err == nil || !strings.Contains(err.Error(), "refusing insecure HTTP") {
+		t.Fatalf("expected non-loopback plaintext bind to be refused, got %v", err)
+	}
+
+	t.Setenv("APP_BIND_ADDR", "127.0.0.1")
+	t.Setenv("APP_TLS_CERT_FILE", filepath.Join(home, "cert.pem"))
+	t.Setenv("APP_TLS_KEY_FILE", "")
+	if err := runServe(); err == nil || !strings.Contains(err.Error(), "configured together") {
+		t.Fatalf("expected half-configured TLS to be refused, got %v", err)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"who-pirates-the-pirates/internal/sqliteuri"
 )
 
 // BuildSearchIndex creates an application-owned FTS5 index for a read-only
@@ -15,7 +17,7 @@ func BuildSearchIndex(sourcePath, indexPath string) error {
 	if strings.TrimSpace(sourcePath) == "" || strings.TrimSpace(indexPath) == "" {
 		return fmt.Errorf("source and index paths are required")
 	}
-	source, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", sourcePath))
+	source, err := sql.Open("sqlite", readOnlyURI(sourcePath))
 	if err != nil {
 		return err
 	}
@@ -31,7 +33,7 @@ func BuildSearchIndex(sourcePath, indexPath string) error {
 	if err := os.Remove(temporaryPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale search index: %w", err)
 	}
-	index, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", temporaryPath))
+	index, err := sql.Open("sqlite", sqliteuri.Build(temporaryPath, "_pragma=busy_timeout(5000)"))
 	if err != nil {
 		return err
 	}

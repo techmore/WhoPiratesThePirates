@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-tmp=$(mktemp -d)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/whop2p-e2e.XXXXXX")
 pid=""
 cleanup() {
   if [[ -n "$pid" ]]; then
@@ -13,21 +13,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-command -v sqlite3 >/dev/null || { echo "sqlite3 is required for the E2E fixture" >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required for the E2E test" >&2; exit 1; }
 
 make -C "$root" build >/dev/null
+bin="$root/bin/whop2p"
+
+# The synthetic metadata fixture is written with the project's own SQLite
+# driver, so the sqlite3 CLI is not required.
 catalog="$tmp/catalog.sqlite"
-sqlite3 "$catalog" <<'SQL'
-create table categories (id integer primary key, name text);
-create table torrents (id integer primary key, category integer, status text, name text, numFiles integer, size real, seeders integer, leechers integer, username text, added integer, description text, imdb text, language text, textLanguage text, infoHash text);
-create table files (id integer primary key, parentTorrentId integer, name text, size real);
-create table yts_movies (id integer primary key);
-create table yts_torrent_data (id integer primary key);
-insert into categories(id, name) values (1, 'Linux');
-insert into torrents values (1, 1, 'seeded', 'Ubuntu 24.04 LTS Desktop amd64', 1, 5970000000, 100, 10, 'ubuntu-torrent', 1710000000, 'Official Ubuntu desktop image', 'tt1234567', 'English', 'English', '0123456789abcdef0123456789abcdef01234567');
-insert into files values (1, 1, 'ubuntu-24.04-desktop-amd64.iso', 5970000000);
-SQL
+(cd "$root" && go run ./scripts/fixture "$catalog")
+
+# CLI contract: usage errors exit 2, help/version exit 0, and nothing starts
+# a server by accident.
+if "$bin" not-a-command >/dev/null 2>&1; then
+  echo "unknown command must fail" >&2; exit 1
+fi
+"$bin" not-a-command >/dev/null 2>&1 || status=$?
+[[ "${status:-0}" -eq 2 ]] || { echo "unknown command exited $status, want 2" >&2; exit 1; }
+"$bin" --help | grep -q 'Usage:'
+"$bin" version | grep -q .
 
 APP_DB_PATH="$catalog" \
 APP_STATE_PATH="$tmp/state.sqlite" \
@@ -35,7 +39,7 @@ ADMIN_PASSWORD='e2e-secret' \
 ADMIN_SESSION_SECRET='01234567890123456789012345678901' \
 APP_BIND_ADDR=127.0.0.1 \
 PORT=18080 \
-"$root/bin/whop2p" >"$tmp/server.log" 2>&1 &
+"$bin" >"$tmp/server.log" 2>&1 &
 pid=$!
 
 for _ in $(seq 1 50); do
@@ -51,4 +55,15 @@ python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["total"] == 1; 
 detail=$(curl --silent --fail http://127.0.0.1:18080/torrent/1)
 grep -q 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567' <<<"$detail"
 
-echo "E2E passed: health, search, detail, and validated magnet link"
+# Public routes must not reveal internal paths; unknown admin hosts are only
+# rejected in no-password mode, so this instance (with a password) answers 401.
+unauth=$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/admin/status)
+[[ "$unauth" == "401" ]] || { echo "expected 401 for anonymous admin status, got $unauth" >&2; exit 1; }
+
+# SIGTERM must stop the server cleanly.
+kill -TERM "$pid"
+wait "$pid"
+pid=""
+grep -q 'shutting down' "$tmp/server.log"
+
+echo "E2E passed: CLI contract, health, search, detail, validated magnet link, graceful shutdown"

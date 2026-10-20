@@ -2,8 +2,9 @@
 
 ## Local E2E
 
-The E2E test uses a synthetic, authorized Ubuntu metadata fixture. It does not
-contact a tracker and does not download or seed content.
+The E2E test uses a synthetic, authorized Ubuntu metadata fixture written by
+`go run ./scripts/fixture`. It does not contact a tracker and does not download
+or seed content, and it does not need the `sqlite3` CLI.
 
 ```sh
 ./scripts/e2e.sh
@@ -12,11 +13,24 @@ contact a tracker and does not download or seed content.
 It validates:
 
 - `whop2p` builds
+- unknown commands exit `2` without starting a server; `--help` and `version` exit `0`
 - the app starts against a real SQLite catalog
 - `/healthz` responds
 - `/api/search` finds the Ubuntu record
 - `/torrent/1` renders
 - the detail page contains a validated `magnet:?xt=urn:btih:` link
+- anonymous requests to `/api/admin/status` are rejected
+- `SIGTERM` shuts the server down cleanly
+
+## Lint
+
+```sh
+make lint          # golangci-lint, configured in .golangci.yml
+go vet ./...
+gofmt -l .
+```
+
+CI also runs `govulncheck ./...` against the latest stable Go toolchain.
 
 For a real authorized Ubuntu torrent smoke test, use a torrent you own or are
 explicitly licensed to use. Keep tracker/network access out of automated CI;

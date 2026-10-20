@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"io"
 	"math"
 	"os"
@@ -218,7 +219,11 @@ func detectAria2At(name string) aria2Status {
 		return aria2Status{}
 	}
 	status := aria2Status{Installed: true, Path: path}
-	output, err := exec.Command(path, "--version").CombinedOutput()
+	// The admin status poll runs this every refresh; a wedged binary must not
+	// hang the handler.
+	ctx, cancel := context.WithTimeout(context.Background(), aria2DetectTimeout)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
 	if err == nil {
 		for _, line := range strings.Split(string(output), "\n") {
 			line = strings.TrimSpace(line)

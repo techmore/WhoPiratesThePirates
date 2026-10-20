@@ -3,12 +3,12 @@ package state
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
+	"who-pirates-the-pirates/internal/sqliteuri"
 )
 
 type Store struct {
@@ -106,7 +106,7 @@ type AdminSettings struct {
 func Open(path string) (*Store, error) {
 	// Foreign-key enforcement is per SQLite connection, so configure it in the
 	// data source name rather than relying on a one-time PRAGMA call.
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path))
+	db, err := sql.Open("sqlite", sqliteuri.Build(path, "_pragma=busy_timeout(5000)", "_pragma=foreign_keys(1)"))
 	if err != nil {
 		return nil, err
 	}

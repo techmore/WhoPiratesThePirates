@@ -8,7 +8,13 @@ import (
 	"strings"
 
 	_ "modernc.org/sqlite"
+	"who-pirates-the-pirates/internal/sqliteuri"
 )
+
+// readOnlyURI opens a catalog file strictly read-only with a bounded busy wait.
+func readOnlyURI(path string) string {
+	return sqliteuri.Build(path, "mode=ro", "_pragma=busy_timeout(5000)")
+}
 
 type Catalog struct {
 	db            *sql.DB
@@ -54,7 +60,7 @@ type Stats struct {
 }
 
 func Open(path string) (*Catalog, error) {
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path))
+	db, err := sql.Open("sqlite", readOnlyURI(path))
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +79,7 @@ func OpenWithSearchIndex(path, indexPath string) (*Catalog, error) {
 	if strings.TrimSpace(indexPath) == "" {
 		return catalog, nil
 	}
-	indexURI := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", indexPath)
+	indexURI := readOnlyURI(indexPath)
 	if _, err := catalog.db.Exec(`attach database ? as search_index`, indexURI); err != nil {
 		_ = catalog.Close()
 		return nil, fmt.Errorf("attach search index: %w", err)
@@ -94,7 +100,7 @@ func Validate(path string) error {
 		return fmt.Errorf("not a regular file: %s", path)
 	}
 
-	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path))
+	db, err := sql.Open("sqlite", readOnlyURI(path))
 	if err != nil {
 		return err
 	}

@@ -24,6 +24,13 @@ is also installed.
 - Track external download status in the admin surface
 - Deploy on macOS, Ubuntu, or an Apple `container machine`
 
+## Screenshots
+
+_Placeholder: add screenshots of the browse page (`/`), a torrent detail page,
+and the admin console (`/admin`) here. The pages render without any external
+assets, so a screenshot of a local instance loaded with the fixture from
+`go run ./scripts/fixture` is representative._
+
 ## What it does not do
 
 `whop2p` does not mirror, seed, or create torrents. Downloads are opt-in from
@@ -142,6 +149,25 @@ container machine run -n catalog
 Orchard can manage the machine, logs, resources, mounts, and network from its
 native macOS UI.
 
+## Command line
+
+```text
+whop2p [command]
+
+  serve               Start the catalog server (default when no command is given)
+  setup               Create the local configuration directory, an empty catalog,
+                      an app-state database, and a service.env file
+  load-catalog FILE   Validate FILE and install it as the local catalog backup
+  open                Check the running server's health and open it in a browser
+  version             Print the build version
+  help                Show the full help, including every environment variable
+```
+
+Exit codes: `0` success, `1` runtime error (startup, validation, or server
+failure), `2` usage error. An unknown command or bad arguments print the usage
+to stderr and never start the server. `whop2p --help` lists every
+configuration variable with its default.
+
 ## First run
 
 ```sh
@@ -238,7 +264,9 @@ approved torrent client must seed the magnet customers use.
 | `PORT` | Listen port | `8080` |
 | `ADMIN_PASSWORD` | Optional admin login password; unset enables local no-password mode | unset |
 | `ADMIN_SESSION_SECRET` | HMAC session secret | random per process |
+| `APP_ALLOWED_HOSTS` | Extra `Host` names (comma separated) allowed to reach the admin surface in no-password mode | unset |
 | `APP_ARIA2_PATH` | Explicit `aria2c` executable path | auto-detected |
+| `APP_ARCHIVE_EXTRACTOR` | Explicit `7z`/`7zz` executable used to unpack downloaded archives | auto-detected |
 | `APP_DOWNLOAD_DIR` | Directory for started downloads | state-directory `downloads` |
 | `APP_TLS_CERT_FILE` | Direct TLS certificate | unset |
 | `APP_TLS_KEY_FILE` | Direct TLS key | unset |
@@ -254,6 +282,34 @@ invalidated after restart.
 The server refuses plaintext HTTP on non-loopback addresses unless TLS is
 configured or `APP_ALLOW_INSECURE_HTTP=true` is explicitly set. Prefer a
 private overlay, SSH tunnel, or TLS reverse proxy.
+
+### No-password mode and the Host header
+
+When `ADMIN_PASSWORD` is unset, every request that reaches the admin surface
+is trusted. To stop a malicious web page from using DNS rebinding to drive the
+admin API through the operator's own browser, the admin page and `/api/admin/*`
+only answer requests whose `Host` header is `localhost`, a `*.localhost` name,
+or an IP literal (for example `127.0.0.1:8080` or `192.168.64.5:8080`). Other
+DNS names get `403` unless listed in `APP_ALLOWED_HOSTS`:
+
+```text
+APP_ALLOWED_HOSTS=catalog.lan,whop2p.internal:8080
+```
+
+The check is skipped when a password is configured, because the signed session
+cookie already binds admin access to the real origin.
+
+### Timeouts
+
+Requests have 30-second read/write deadlines. The catalog upload and catalog
+load routes extend their own deadline (two hours and one hour respectively) so
+a multi-gigabyte backup or a first-time search-index build is not cut off.
+`aria2c --version` probes are bounded to 5 seconds and archive extraction to
+one hour. `SIGINT`/`SIGTERM` drain in-flight requests for up to 10 seconds and
+then close both databases.
+
+Public browse routes never echo internal error text; the cause is written to
+the server log and the client receives a generic `internal server error`.
 
 ## Public routes
 
@@ -307,17 +363,31 @@ It records the reference and parsed metadata in app state, then starts
 make test
 make vet
 make race
+make lint      # golangci-lint (config in .golangci.yml)
 make build
 ```
 
-The local end-to-end test uses a synthetic Ubuntu metadata fixture:
+CI (`.github/workflows/ci.yml`) runs the unit tests with and without the race
+detector, `go vet`, `gofmt`, `golangci-lint`, `govulncheck`, the end-to-end
+script, and a release-style build on Ubuntu and macOS.
+
+To run a local instance against a small synthetic catalog (metadata only,
+nothing is fetched or seeded):
+
+```sh
+make build
+go run ./scripts/fixture /tmp/catalog.sqlite
+APP_DB_PATH=/tmp/catalog.sqlite APP_STATE_PATH=/tmp/state.sqlite ./bin/whop2p
+```
+
+The end-to-end test builds the binary, writes the same fixture, checks the CLI
+exit-code contract, starts the server, and verifies health, search, detail
+rendering, magnet generation, anonymous admin rejection, and graceful shutdown.
+It only needs `curl` and `python3`:
 
 ```sh
 ./scripts/e2e.sh
 ```
-
-It validates health, search, detail rendering, and magnet generation without
-contacting a tracker or downloading content.
 
 Container publishing to Harbor or another OCI registry uses Apple's `container`
 CLI:
@@ -335,10 +405,11 @@ internal/app     routes, auth, templates, and handlers
 internal/catalog read-only catalog queries
 internal/state   app-owned SQLite state and audit data
 internal/importer manifest and external-reference validation
+internal/sqliteuri SQLite file-URI construction shared by every database open
 deploy/macos     native launchd deployment
 deploy/ubuntu    native systemd deployment
 deploy/orchard   Apple container machine deployment
-scripts          E2E and OCI publishing helpers
+scripts          E2E test, synthetic fixture generator, and OCI publishing helpers
 docs             release and testing notes
 ```
 
