@@ -12,7 +12,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS ?= -s -w
 VERSION_LDFLAGS ?= -X main.version=$(VERSION)
 
-.PHONY: all build test vet race clean linux linux-arm64 darwin container-build container-run container-stop orchard-build orchard-create orchard-shell orchard-stop
+.PHONY: all build test vet race lint fixture clean linux linux-arm64 darwin container-build container-run container-stop orchard-build orchard-create orchard-shell orchard-stop
 
 all: test build
 
@@ -29,6 +29,16 @@ vet:
 
 race:
 	$(GO) test -race ./...
+
+lint:
+	golangci-lint run ./...
+
+# Synthetic metadata-only catalog for local development and the E2E test.
+FIXTURE ?= $(BUILD_DIR)/fixture-catalog.sqlite
+fixture:
+	@mkdir -p $(BUILD_DIR)
+	$(GO) run ./scripts/fixture $(FIXTURE)
+	@echo "run: APP_DB_PATH=$(FIXTURE) APP_STATE_PATH=$(BUILD_DIR)/fixture-state.sqlite $(BUILD_DIR)/$(BINARY)"
 
 linux:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -ldflags="$(LDFLAGS) $(VERSION_LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-linux-amd64 ./cmd/server

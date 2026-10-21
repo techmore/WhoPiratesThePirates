@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -43,6 +44,7 @@ type App struct {
 	archiveExtractor string
 	state            *state.Store
 	adminPass        string
+	allowedHosts     []string
 	secret           []byte
 	secureCookies    bool
 	loginAttempts    map[string]loginAttempt
@@ -56,6 +58,48 @@ type App struct {
 const maxRequestBodyBytes int64 = 1 << 20
 const maxCatalogUploadBytes int64 = 4 << 30
 const maxCatalogUploadMemoryBytes = 32 << 20
+
+// Handlers that stream multi-gigabyte catalogs or build a search index run far
+// longer than the server's default per-request timeouts, so they extend their
+// own connection deadlines instead of the whole server running without one.
+const (
+	catalogUploadDeadline = 2 * time.Hour
+	catalogLoadDeadline   = 1 * time.Hour
+	// Bounds for the external tools the admin surface shells out to.
+	aria2DetectTimeout     = 5 * time.Second
+	archiveExtractTimeout  = 1 * time.Hour
+	publicErrorMessage     = "internal server error"
+	adminHostRejectMessage = "forbidden: Host header is not allowed for the admin surface in no-password mode; use localhost, an IP address, or set APP_ALLOWED_HOSTS"
+)
+
+// internalError hides database and filesystem details from unauthenticated
+// responses. The real cause is logged for the operator.
+func internalError(w http.ResponseWriter, r *http.Request, err error) {
+	log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
+	http.Error(w, publicErrorMessage, http.StatusInternalServerError)
+}
+
+// extendRequestDeadline lifts the server-wide read/write timeouts for one
+// long-running request. Response writers that cannot be controlled (tests,
+// some middleware) are ignored.
+func extendRequestDeadline(w http.ResponseWriter, duration time.Duration) {
+	controller := http.NewResponseController(w)
+	deadline := time.Now().Add(duration)
+	_ = controller.SetReadDeadline(deadline)
+	_ = controller.SetWriteDeadline(deadline)
+}
+
+// parseAllowedHosts normalizes a comma-separated APP_ALLOWED_HOSTS value.
+func parseAllowedHosts(value string) []string {
+	var hosts []string
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		if entry != "" {
+			hosts = append(hosts, entry)
+		}
+	}
+	return hosts
+}
 
 // parseAdminForm populates r.Form for both encodings a browser can send.
 // Request.ParseForm only understands application/x-www-form-urlencoded, so a
@@ -133,6 +177,11 @@ type Options struct {
 	SecureCookies      bool
 	Version            string
 	DownloadClientPath string
+	// AllowedHosts lists additional Host header values (host or host:port)
+	// that may reach the admin surface while no admin password is set. It
+	// defaults to APP_ALLOWED_HOSTS. Loopback names and IP literals are always
+	// allowed; other DNS names are rejected to defeat DNS rebinding.
+	AllowedHosts []string
 }
 
 func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
@@ -206,6 +255,10 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 		aria2Path = resolveAria2Path()
 	}
 	archiveExtractor := resolveArchiveExtractor()
+	allowedHosts := options.AllowedHosts
+	if len(allowedHosts) == 0 {
+		allowedHosts = parseAllowedHosts(os.Getenv("APP_ALLOWED_HOSTS"))
+	}
 	embedded, err := loadEmbeddedTemplates(releaseVersion)
 	if err != nil {
 		_ = db.Close()
@@ -226,6 +279,7 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 		archiveExtractor: archiveExtractor,
 		state:            st,
 		adminPass:        os.Getenv("ADMIN_PASSWORD"),
+		allowedHosts:     allowedHosts,
 		secret:           secret,
 		secureCookies:    options.SecureCookies,
 		loginAttempts:    make(map[string]loginAttempt),
@@ -323,7 +377,7 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.renderPage(w, "index", "index.html", nil); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalError(w, r, err)
 	}
 }
 
@@ -340,7 +394,7 @@ func (a *App) handleTorrentPage(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalError(w, r, err)
 		return
 	}
 	magnet := magnetLink(torrent.InfoHash, torrent.Name)
@@ -367,15 +421,19 @@ func (a *App) handleTorrentPage(w http.ResponseWriter, r *http.Request) {
 		"IMDB":         deref(torrent.IMDB),
 		"Files":        files,
 	}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalError(w, r, err)
 	}
 }
 
 func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdmin(r) {
 		if err := a.renderPage(w, "admin_login", "admin_login.html", nil); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			internalError(w, r, err)
 		}
+		return
+	}
+	if !a.adminHostAllowed(r) {
+		http.Error(w, adminHostRejectMessage, http.StatusForbidden)
 		return
 	}
 	s, err := a.state.GetAdminSettings()
@@ -409,7 +467,7 @@ func (a *App) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.renderPage(w, "admin", "admin.html", AdminPageData{AdminSettings: s, CatalogSources: catalogSources, CatalogPresets: defaultCatalogPresets(), ImportSources: sources, ImportRuns: runs, ImportManifests: manifests, AuditEntries: audits}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalError(w, r, err)
 	}
 }
 
@@ -474,7 +532,7 @@ func (a *App) handleHealthz(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := a.catalogStats()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		internalError(w, r, err)
 		return
 	}
 	writeJSON(w, stats)
@@ -483,7 +541,7 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleCategories(w http.ResponseWriter, r *http.Request) {
 	items, err := a.catalogCategories()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalError(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{"items": items})
@@ -502,7 +560,7 @@ func (a *App) handleCatalogSources(w http.ResponseWriter, r *http.Request) {
 	}
 	sources, err := a.state.EnabledCatalogSources()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		internalError(w, r, err)
 		return
 	}
 	links := make([]catalogSourceLink, 0, len(sources))
@@ -530,7 +588,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	offset := clampInt(queryInt(r, "offset", 0), 0, 1000000)
 	items, total, err := a.catalogSearchPage(q, category, sortField, sortDir, limit, offset)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		internalError(w, r, err)
 		return
 	}
 	hasMore := int64(offset)+int64(len(items)) < total
@@ -554,7 +612,7 @@ func (a *App) handleTorrentDetail(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		http.Error(w, err.Error(), 500)
+		internalError(w, r, err)
 		return
 	}
 	writeJSON(w, map[string]any{"torrent": torrent, "files": files})
@@ -1594,6 +1652,9 @@ func (a *App) handleAdminCatalogSources(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if r.FormValue("load_now") != "" && catalogPath != "" {
+			extendRequestDeadline(w, catalogLoadDeadline)
+		}
 		if err := a.state.CreateCatalogSource(name, magnet, catalogPath, enabled); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1624,6 +1685,9 @@ func (a *App) handleAdminCatalogSourceUpload(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// A multi-gigabyte upload, validation, and index build cannot finish
+	// inside the server's 30s read/write timeouts.
+	extendRequestDeadline(w, catalogUploadDeadline)
 	if err := r.ParseMultipartForm(maxCatalogUploadMemoryBytes); err != nil {
 		_ = a.state.Audit("catalog_source_upload_rejected", err.Error())
 		http.Error(w, "invalid upload form", http.StatusBadRequest)
@@ -1878,6 +1942,9 @@ func (a *App) handleAdminLoadCatalogSource(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid catalog path", http.StatusBadRequest)
 		return
 	}
+	// Validation plus a first-time FTS index build on a large catalog takes
+	// minutes; keep the connection alive until the result is known.
+	extendRequestDeadline(w, catalogLoadDeadline)
 	name := "Direct catalog path"
 	if source.ID > 0 {
 		name = source.Name
@@ -2162,12 +2229,51 @@ func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		if !a.adminHostAllowed(r) {
+			http.Error(w, adminHostRejectMessage, http.StatusForbidden)
+			return
+		}
 		if isUnsafeMethod(r.Method) && !sameOrigin(r) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next(w, r)
 	}
+}
+
+// adminHostAllowed defends the password-free local admin mode against DNS
+// rebinding. A page on attacker.example whose DNS record is flipped to
+// 127.0.0.1 would otherwise satisfy sameOrigin (Origin and Host both read
+// attacker.example) and could drive the admin API. Rebinding needs a DNS name,
+// so loopback names and raw IP literals are always accepted; any other name
+// must be listed explicitly. With a password configured the session cookie
+// already scopes access to the real origin, so the check is skipped.
+func (a *App) adminHostAllowed(r *http.Request) bool {
+	if a.adminPasswordConfigured() {
+		return true
+	}
+	host := strings.ToLower(strings.TrimSpace(r.Host))
+	if host == "" {
+		// Only non-browser HTTP/1.0 clients omit Host; browsers always send it.
+		return true
+	}
+	hostname := host
+	if parsed, _, err := net.SplitHostPort(host); err == nil {
+		hostname = parsed
+	}
+	hostname = strings.TrimSuffix(strings.TrimPrefix(hostname, "["), "]")
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return true
+	}
+	if net.ParseIP(hostname) != nil {
+		return true
+	}
+	for _, allowed := range a.allowedHosts {
+		if allowed == hostname || allowed == host {
+			return true
+		}
+	}
+	return false
 }
 
 func catalogSearchIndexPath(directory, catalogPath string) string {

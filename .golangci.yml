@@ -1,0 +1,32 @@
+version: "2"
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      # Deferred cleanup of readers, rows, and transactions: the error is
+      # either already surfaced by the operation that mattered or is
+      # intentionally best-effort.
+      exclude-functions:
+        - (*database/sql.DB).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Tx).Rollback
+        - (*os.File).Close
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*who-pirates-the-pirates/internal/app.App).Close
+        - (*who-pirates-the-pirates/internal/catalog.Catalog).Close
+        - (*who-pirates-the-pirates/internal/state.Store).Close
+        # CLI output to stdout/stderr: a failed write has nowhere to be reported.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    staticcheck:
+      checks:
+        - all
+        - -QF1001 # De Morgan rewrites hurt readability of the hash validators
+        - -ST1000 # package comments are not required for internal packages
+
+formatters:
+  enable:
+    - gofmt

@@ -263,7 +263,9 @@ func TestAdminAccessIsAvailableWithoutPasswordForLocalMode(t *testing.T) {
 	defer a.Close()
 	a.adminPass = ""
 
-	pageReq := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	// Password-free mode is meant for loopback; httptest defaults Host to
+	// example.com, which the rebinding guard rightly rejects.
+	pageReq := httptest.NewRequest(http.MethodGet, "http://localhost:8080/admin", nil)
 	pageRec := httptest.NewRecorder()
 	a.Router().ServeHTTP(pageRec, pageReq)
 	if pageRec.Code != http.StatusOK {
@@ -278,11 +280,100 @@ func TestAdminAccessIsAvailableWithoutPasswordForLocalMode(t *testing.T) {
 		}
 	}
 
-	statusReq := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	statusReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/admin/status", nil)
 	statusRec := httptest.NewRecorder()
 	a.Router().ServeHTTP(statusRec, statusReq)
 	if statusRec.Code != http.StatusOK {
 		t.Fatalf("expected password-free admin status, got %d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+}
+
+func TestPasswordFreeAdminRejectsRebindableHosts(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+	a.adminPass = ""
+	a.allowedHosts = []string{"catalog.lan"}
+
+	allowed := []string{"localhost", "localhost:8080", "app.localhost:18081", "127.0.0.1:18085", "[::1]:8080", "192.168.64.5:8080", "catalog.lan", "catalog.lan:8080"}
+	for _, host := range allowed {
+		for _, path := range []string{"/admin", "/api/admin/status"} {
+			req := httptest.NewRequest(http.MethodGet, "http://"+host+path, nil)
+			rec := httptest.NewRecorder()
+			a.Router().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected Host %q to reach %s, got %d body=%s", host, path, rec.Code, rec.Body.String())
+			}
+		}
+	}
+
+	// A DNS name that is not listed could be rebound to 127.0.0.1 by an
+	// attacker's page; sameOrigin alone would accept it because Origin and
+	// Host agree.
+	for _, host := range []string{"attacker.example", "attacker.example:8080", "catalog.lan.attacker.example"} {
+		for _, path := range []string{"/admin", "/api/admin/status"} {
+			req := httptest.NewRequest(http.MethodGet, "http://"+host+path, nil)
+			rec := httptest.NewRecorder()
+			a.Router().ServeHTTP(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected Host %q to be rejected for %s, got %d body=%s", host, path, rec.Code, rec.Body.String())
+			}
+		}
+		req := httptest.NewRequest(http.MethodPost, "http://"+host+"/api/admin/audits/delete", strings.NewReader("id=1"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", "http://"+host)
+		rec := httptest.NewRecorder()
+		a.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected rebinding POST from %q to be rejected, got %d body=%s", host, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestHostCheckIsSkippedWhenPasswordConfigured(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+	cookie := loginAsAdmin(t, a)
+
+	req := httptest.NewRequest(http.MethodGet, "http://catalog.internal.example/api/admin/status", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected password-protected admin to accept any Host, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestParseAllowedHosts(t *testing.T) {
+	got := parseAllowedHosts(" Catalog.LAN , , whop2p.internal:8080 ")
+	want := []string{"catalog.lan", "whop2p.internal:8080"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("parseAllowedHosts = %v, want %v", got, want)
+	}
+	if parseAllowedHosts("") != nil {
+		t.Fatalf("expected empty value to produce no hosts")
+	}
+}
+
+func TestPublicRoutesHideInternalErrorDetails(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	// Simulate a failed catalog so every public query errors out.
+	a.catalogMu.Lock()
+	_ = a.catalog.Close()
+	a.catalog = nil
+	a.catalogMu.Unlock()
+
+	for _, path := range []string{"/api/stats", "/api/categories", "/api/search?q=ubuntu", "/api/torrents/1", "/torrent/1"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		a.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected %s to fail with 500, got %d", path, rec.Code)
+		}
+		if body := strings.TrimSpace(rec.Body.String()); body != publicErrorMessage {
+			t.Fatalf("expected %s to hide the error cause, got body=%q", path, body)
+		}
 	}
 }
 
