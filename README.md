@@ -229,8 +229,15 @@ The loader:
 5. Backs up the current catalog.
 6. Atomically installs the replacement.
 
-The catalog remains read-only after installation. App-owned state is written
-only to `app_state.sqlite`.
+The catalog remains read-only after installation. Settings and activity are
+stored in `app_state.sqlite`; derived search caches live beside it in the app
+state directory.
+
+For large catalogs, the app builds a disk-backed FTS5 index automatically and
+reuses it across restarts while the source file is unchanged. SQLite page
+caches, catalog counts, categories, and a bounded set of recent search pages
+are also cached automatically. Loading a different catalog creates a fresh
+in-memory cache, and the persistent index is rebuilt if the source changes.
 
 ### Recovery catalog links
 

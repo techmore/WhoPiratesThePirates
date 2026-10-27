@@ -3222,3 +3222,187 @@ func seedState(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+func postAdminForm(t *testing.T, a *App, cookie *http.Cookie, path string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	a.Router().ServeHTTP(rec, req)
+	return rec
+}
+
+// The reset is the most destructive thing the console can do, so it has to
+// refuse everything short of a deliberate, confirmed POST.
+func TestAdminStateResetRequiresConfirmedPost(t *testing.T) {
+	a, _ := newAdminTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	if err := a.state.CreateImportSource("keep me", "https", "https://example.com/feed.json", true); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginAsAdmin(t, a)
+
+	cases := []struct {
+		name string
+		form url.Values
+		code int
+	}{
+		{"no confirmation", url.Values{}, http.StatusBadRequest},
+		{"wrong confirmation", url.Values{"confirm": []string{"reset"}}, http.StatusBadRequest},
+		{"unrelated word", url.Values{"confirm": []string{"DELETE EVERYTHING"}}, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postAdminForm(t, a, cookie, "/api/admin/state/reset", tc.form)
+			if rec.Code != tc.code {
+				t.Fatalf("expected %d, got %d body=%s", tc.code, rec.Code, rec.Body.String())
+			}
+			sources, err := a.state.ImportSources()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sources) != 1 {
+				t.Fatalf("a refused reset must not delete records, got %d sources", len(sources))
+			}
+		})
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/admin/state/reset", nil)
+	getReq.AddCookie(cookie)
+	getRec := httptest.NewRecorder()
+	a.Router().ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected GET to be rejected, got %d", getRec.Code)
+	}
+
+	anon := postAdminForm(t, a, nil, "/api/admin/state/reset", url.Values{"confirm": []string{"RESET"}})
+	if anon.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated reset to be rejected, got %d", anon.Code)
+	}
+}
+
+// A confirmed reset must clear the operational tables, leave the catalog
+// database and the admin session alone, and leave one audit row recording it.
+func TestAdminStateResetClearsRecordsAndKeepsSession(t *testing.T) {
+	a, catalogPath, _ := newTestApp(t, testAdminPassword)
+	defer a.Close()
+
+	if err := a.state.CreateImportSource("mirror", "https", "https://example.com/feed.json", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateImportRun(1, "queued", "waiting", "", "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.CreateCatalogSource("recovery", "magnet:?xt=urn:btih:abc", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.state.CreateImportReference("magnet", "magnet:?xt=urn:btih:abc", "abc", "ref", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.state.PutAdminSettings(state.AdminSettings{TorEnabled: true, TorMode: "dual"}); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginAsAdmin(t, a)
+
+	rec := postAdminForm(t, a, cookie, "/api/admin/state/reset", url.Values{"confirm": []string{"RESET"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected code %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Reset   bool             `json:"reset"`
+		Removed map[string]int64 `json:"removed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Reset {
+		t.Fatal("expected reset flag in the response")
+	}
+	if payload.Removed["import_sources"] != 1 || payload.Removed["import_runs"] != 1 ||
+		payload.Removed["catalog_sources"] != 1 || payload.Removed["import_references"] != 1 {
+		t.Fatalf("unexpected removal counts: %#v", payload.Removed)
+	}
+
+	for name, count := range map[string]int{
+		"import_sources":    len(mustSources(t, a)),
+		"import_runs":       len(mustRuns(t, a)),
+		"import_references": len(mustReferences(t, a)),
+		"catalog_sources":   len(mustCatalogSources(t, a)),
+	} {
+		if count != 0 {
+			t.Fatalf("expected %s to be empty after a reset, got %d", name, count)
+		}
+	}
+
+	// Exactly one audit row survives, and it records the reset itself.
+	entries, err := a.state.AuditEntries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Action != "admin_state_reset" {
+		t.Fatalf("expected a single admin_state_reset audit row, got %#v", entries)
+	}
+
+	// The settings that keep the operator logged in and the Tor config intact.
+	settings, err := a.state.GetAdminSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.TorEnabled || settings.TorMode != "dual" {
+		t.Fatalf("a reset must not disturb the Tor configuration, got %#v", settings)
+	}
+
+	// The catalog database is a separate read-only file and must be untouched.
+	if _, err := os.Stat(catalogPath); err != nil {
+		t.Fatalf("catalog database must survive a reset: %v", err)
+	}
+	if _, _, err := a.catalog.SearchPage("hello", "", "", "", 1, 0); err != nil {
+		t.Fatalf("catalog must still be searchable after a reset: %v", err)
+	}
+
+	// The session that performed the reset is still usable afterwards.
+	after := postAdminForm(t, a, cookie, "/api/admin/tor", url.Values{"tor_mode": []string{"off"}})
+	if after.Code != http.StatusSeeOther && after.Code != http.StatusOK {
+		t.Fatalf("session should survive the reset, got %d body=%s", after.Code, after.Body.String())
+	}
+}
+
+func mustSources(t *testing.T, a *App) []state.ImportSource {
+	t.Helper()
+	items, err := a.state.ImportSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
+}
+
+func mustRuns(t *testing.T, a *App) []state.ImportRun {
+	t.Helper()
+	items, err := a.state.ImportRuns(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
+}
+
+func mustReferences(t *testing.T, a *App) []state.ImportReference {
+	t.Helper()
+	items, err := a.state.ImportReferences(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
+}
+
+func mustCatalogSources(t *testing.T, a *App) []state.CatalogSource {
+	t.Helper()
+	items, err := a.state.CatalogSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
+}

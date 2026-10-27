@@ -157,6 +157,30 @@ band, section tabs, panels, dense record tables, and status tags.
     .step-foot { grid-column:1 / -1; display:flex; align-items:center; justify-content:space-between; gap:8px; }
     .step-foot a { font-size:12px; font-weight:700; }
 
+    /* Keep the current recovery phase and transfer meter in view while the
+       operator moves through the longer recovery form and history table. */
+    .recovery-activity {
+      position:sticky;
+      top:58px;
+      z-index:18;
+      display:grid;
+      gap:8px;
+      margin:0 0 14px;
+      padding:12px 15px;
+      border:1px solid rgba(87, 93, 61, .34);
+      border-left:4px solid var(--olive-700);
+      border-radius:12px;
+      background:rgba(247, 248, 244, .97);
+      box-shadow:0 12px 28px -20px rgba(31, 33, 23, .8);
+    }
+    .recovery-activity[hidden] { display:none; }
+    .recovery-activity-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .recovery-activity-title { margin:0; font-family:inherit; font-size:15px; font-weight:800; line-height:1.25; overflow-wrap:anywhere; }
+    .recovery-activity-detail { margin:2px 0 0; color:var(--muted); font-size:12.5px; line-height:1.4; overflow-wrap:anywhere; }
+    .recovery-activity-progress[hidden] { display:none; }
+    .recovery-activity-progress .download-progress { min-width:0; }
+    .recovery-activity-progress .download-progress progress { height:10px; }
+
     /* Status tags */
     .tag {
       display:inline-flex;
@@ -427,6 +451,25 @@ band, section tabs, panels, dense record tables, and status tags.
     }
     .is-busy { opacity:.6; pointer-events:none; }
 
+    /* Danger zone: the reset is the only control here that can destroy work. */
+    .danger-zone {
+      border:1px solid rgba(150, 55, 45, .3);
+      border-radius:14px;
+      background:rgba(150, 55, 45, .04);
+      padding:16px 16px 18px;
+    }
+    .danger-zone h3 { color:#8a3229; }
+    .btn-danger {
+      background:#96372d;
+      border-color:#7d2d25;
+      color:#fdf6f4;
+    }
+    .btn-danger:hover:not(:disabled) { background:#7d2d25; }
+    .btn-danger:disabled { opacity:.45; cursor:not-allowed; }
+    #reset-scope { margin:12px 0; }
+    #reset-scope:empty { display:none; }
+    #reset-confirm { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; max-width:220px; }
+
     @media (max-width: 900px) {
       .admin-stats { grid-template-columns:repeat(2, minmax(0, 1fr)); }
       .steps { grid-template-columns:1fr; }
@@ -438,6 +481,7 @@ band, section tabs, panels, dense record tables, and status tags.
       .field-grid { grid-template-columns:1fr; }
       .admin-tabs { border-radius:16px; }
       .table-bar input[type="search"] { width:100%; }
+      .recovery-activity { top:54px; padding:10px 12px; }
     }
   </style>
 {{end}}
@@ -513,6 +557,17 @@ band, section tabs, panels, dense record tables, and status tags.
           <p class="panel-note">Each step leaves the previous artifact in place, so the recovery path stays inspectable and repeatable.</p>
         </div>
         <span class="tag is-ok">Operator runbook</span>
+      </div>
+      <div class="recovery-activity" id="recovery-activity" role="status" aria-live="polite" aria-atomic="false" hidden>
+        <div class="recovery-activity-head">
+          <div class="muted section-eyebrow">Current recovery</div>
+          <span class="tag is-muted" id="recovery-activity-phase">Ready</span>
+        </div>
+        <div>
+          <h3 class="recovery-activity-title" id="recovery-activity-title"></h3>
+          <p class="recovery-activity-detail" id="recovery-activity-detail"></p>
+        </div>
+        <div class="recovery-activity-progress" id="recovery-activity-progress" hidden></div>
       </div>
       <div class="steps">
         <a class="step" href="#magnet-download">
@@ -1134,6 +1189,32 @@ band, section tabs, panels, dense record tables, and status tags.
           <button type="submit" class="btn-quiet">Sign out</button>
         </form>
       </div>
+
+      <div class="panel danger-zone">
+        <div class="panel-head">
+          <div>
+            <h3>Reset app state</h3>
+            <p class="panel-note">Clears every operational record so a recovery or load run can be exercised from a clean slate. This cannot be undone.</p>
+          </div>
+          <span class="tag is-error">Destructive</span>
+        </div>
+        <div class="callout">
+          <strong>Kept</strong>
+          <span>The catalog database, its loaded handle, the Tor configuration and this session all survive. Only records held in the app-state database are discarded.</span>
+        </div>
+        <div class="meta-list" id="reset-scope"></div>
+        <form id="reset-form" class="field-grid" data-handled>
+          <div class="field">
+            <label for="reset-confirm">Type <code>RESET</code> to enable the button</label>
+            <input id="reset-confirm" name="confirm" autocomplete="off" spellcheck="false" placeholder="RESET">
+          </div>
+          <div class="field">
+            <span class="hint">The reset itself is recorded in the audit log.</span>
+            <button type="submit" id="reset-submit" class="btn-danger" disabled>Reset app state</button>
+          </div>
+        </form>
+        <div id="reset-result" class="result-line" role="status" aria-live="polite"></div>
+      </div>
     </section>
 
   </div>
@@ -1451,6 +1532,11 @@ band, section tabs, panels, dense record tables, and status tags.
       statusSession.textContent = (data.adminSessionEpoch || 0) + ' · scoped to this device';
       statusLogin.textContent = data.lastLoginAt ? formatTime(data.lastLoginAt) : 'No sign-in audit recorded yet.';
       statusLogout.textContent = data.lastLogoutAt ? formatTime(data.lastLogoutAt) : 'No sign-out audit recorded yet.';
+      /* Keep the reset panel's scope list honest about what it would discard. */
+      document.querySelectorAll('[data-reset-count]').forEach(function(node) {
+        const value = data[node.getAttribute('data-reset-count')];
+        node.textContent = typeof value === 'number' ? String(value) : '—';
+      });
       refreshTabCounts(data);
 
       const sourceCount = data.catalogSourceCount || 0;
@@ -1876,6 +1962,11 @@ band, section tabs, panels, dense record tables, and status tags.
     const magnetList = document.getElementById('magnet-download-list');
     const magnetMeta = document.getElementById('magnet-list-meta');
     const magnetClientTag = document.getElementById('magnet-client-tag');
+    const recoveryActivity = document.getElementById('recovery-activity');
+    const recoveryActivityPhase = document.getElementById('recovery-activity-phase');
+    const recoveryActivityTitle = document.getElementById('recovery-activity-title');
+    const recoveryActivityDetail = document.getElementById('recovery-activity-detail');
+    const recoveryActivityProgress = document.getElementById('recovery-activity-progress');
 
     if (magnetForm && magnetStatus && magnetList) {
       const preset = document.getElementById('catalog-preset');
@@ -1965,6 +2056,42 @@ band, section tabs, panels, dense record tables, and status tags.
           '</div>';
       }
 
+      function recoveryActivityLabel(item) {
+        if (item.downloadError || item.recoveryError || item.recoveryStatus === 'failed' || item.downloadStatus === 'failed') return 'Needs attention';
+        if (item.recoveryStatus && RECOVERY_LABELS[item.recoveryStatus]) return RECOVERY_LABELS[item.recoveryStatus];
+        if (item.downloadStatus === 'starting') return 'Resolving torrent metadata';
+        if (item.downloadStatus === 'started' || item.downloadStatus === 'running') return 'Downloading archive';
+        if (item.downloadStatus === 'completed') return 'Download complete';
+        return item.downloadStatus || 'Reference saved';
+      }
+
+      function renderRecoveryActivity(items) {
+        if (!recoveryActivity) return;
+        const busy = items.find(function(item) {
+          return BUSY.indexOf(item.downloadStatus) >= 0 || item.recoveryStatus === 'waiting_for_download' || RECOVERY_BUSY.indexOf(item.recoveryStatus) >= 0;
+        });
+        const item = busy || items[0];
+        if (!item) {
+          recoveryActivity.hidden = true;
+          return;
+        }
+
+        const activeTransfer = ['starting', 'started', 'running'].indexOf(item.downloadStatus) >= 0;
+        const phase = recoveryActivityLabel(item);
+        const detail = itemDetail(item) || (activeTransfer
+          ? (item.downloadStatus === 'starting' ? 'aria2c is resolving torrent metadata and preparing the transfer.' : 'The archive is downloading to the configured recovery directory.')
+          : (item.recoveryStatus === 'loaded' ? 'The database is ready for catalog searches.' : 'The latest recovery update is shown here.'));
+        recoveryActivity.hidden = false;
+        recoveryActivityTitle.textContent = item.name || item.infoHash || item.reference || 'Catalog recovery';
+        recoveryActivityDetail.textContent = detail;
+        recoveryActivityPhase.textContent = phase;
+        recoveryActivityPhase.className = 'tag ' + (TONES[itemTone(item)] || '');
+
+        const hasProgress = activeTransfer || Number(item.totalBytes) > 0 || Number(item.downloadProgress) > 0;
+        recoveryActivityProgress.hidden = !hasProgress;
+        recoveryActivityProgress.innerHTML = hasProgress ? transferProgress(item) : '';
+      }
+
       /* The full set is kept so a filter can re-render instantly, while the
          workflow stepper always reflects every transfer, filtered or not. */
       let magnetItems = [];
@@ -2012,6 +2139,7 @@ band, section tabs, panels, dense record tables, and status tags.
         const items = result.data.items || [];
         const same = JSON.stringify(items) === JSON.stringify(magnetItems);
         magnetItems = items;
+        renderRecoveryActivity(items);
         const q = magnetQuery();
         renderMagnets(items.filter(function(item) { return magnetMatches(item, q); }));
 
@@ -2305,6 +2433,77 @@ band, section tabs, panels, dense record tables, and status tags.
       if (!detail) return null;
       const button = detail.previousElementSibling && detail.previousElementSibling.querySelector('[data-select-id]');
       return button ? function() { button.click(); } : null;
+    }
+
+    /* ------------------------------------------------- reset app state */
+    /* The button stays disabled until the operator types the exact phrase, so a
+       stray reload or an over-eager click cannot discard an afternoon of
+       recovery work. */
+    const resetForm = document.getElementById('reset-form');
+    const resetConfirm = document.getElementById('reset-confirm');
+    const resetSubmit = document.getElementById('reset-submit');
+    const resetResult = document.getElementById('reset-result');
+    const resetScope = document.getElementById('reset-scope');
+    const RESET_PHRASE = 'RESET';
+
+    if (resetForm && resetConfirm && resetSubmit) {
+      resetConfirm.addEventListener('input', function() {
+        resetSubmit.disabled = resetConfirm.value.trim() !== RESET_PHRASE;
+      });
+
+      resetForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+        if (resetConfirm.value.trim() !== RESET_PHRASE) return;
+        const ok = window.confirm(
+          'Discard every operational record?\n\n' +
+          'Import sources, runs, manifests, transfers and configured recovery ' +
+          'sources are deleted and cannot be recovered. The catalog database ' +
+          'and this session are kept.'
+        );
+        if (!ok) return;
+        resetSubmit.disabled = true;
+        setResult(resetResult, 'Clearing app state…');
+        try {
+          const result = await fetchJSON('/api/admin/state/reset', {
+            method: 'POST',
+            body: new FormData(resetForm),
+          });
+          if (!result.ok) {
+            setResult(resetResult, 'The reset did not run: ' + serverMessage(result, 'the server rejected the request.'), 'error');
+            resetSubmit.disabled = false;
+            return;
+          }
+          const removed = result.data.removed || {};
+          const parts = Object.keys(removed).sort().map(function(key) {
+            return removed[key] + ' ' + key.replace(/_/g, ' ');
+          });
+          setResult(resetResult, 'App state cleared (' + parts.join(', ') + ').', 'ok');
+          toast('App state cleared', 'ok', parts.join(', '));
+          resetConfirm.value = '';
+          afterMutation();
+        } catch (err) {
+          setResult(resetResult, 'The reset could not reach the server.', 'error');
+          resetSubmit.disabled = false;
+        }
+      });
+    }
+
+    /* Spell out what a reset would discard, so the scope is never a guess. */
+    if (resetScope) {
+      const scopeRows = [
+        ['Import sources', 'importSourceCount'],
+        ['Import runs', 'importRunCount'],
+        ['Manifests', 'importManifestTotalCount'],
+        ['Configured recovery sources', 'catalogSourceCount'],
+        ['Audit rows', 'auditCount'],
+      ];
+      resetScope.innerHTML = scopeRows.map(function(entry) {
+        return '<div class="meta-row"><span>' + escapeHtml(entry[0]) +
+          '</span><span class="muted" data-reset-count="' + escapeHtml(entry[1]) + '">—</span></div>';
+      }).join('');
+      /* The first status load has already run by now, before these rows
+         existed, so ask for a second one to fill them in. */
+      refreshStatus();
     }
 
   })();

@@ -125,7 +125,7 @@ func (a *App) recoverReference(id int64, reference, name, preferredDir string) {
 		return
 	}
 
-	a.setRecoveryStatus(id, "loading", "Building the search index and switching the active catalog. This may take a while for large databases.", catalogPath, "")
+	a.setRecoveryStatus(id, "loading", "Preparing the local search index cache and switching the active catalog. A matching index is reused after restart; large databases can take a while to build it.", catalogPath, "")
 	if err := a.replaceCatalogValidated(catalogPath, recoveryName); err != nil {
 		a.failRecovery(id, catalogPath, err)
 		return

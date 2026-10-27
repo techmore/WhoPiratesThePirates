@@ -101,6 +101,8 @@ func parseAllowedHosts(value string) []string {
 	return hosts
 }
 
+var searchIndexBuildMu sync.Mutex
+
 // parseAdminForm populates r.Form for both encodings a browser can send.
 // Request.ParseForm only understands application/x-www-form-urlencoded, so a
 // fetch call that posts FormData (which is multipart/form-data) would otherwise
@@ -208,16 +210,9 @@ func NewWithOptions(dbPath, statePath string, options Options) (*App, error) {
 	searchIndexDir := filepath.Join(filepath.Dir(statePath), "search-index")
 	searchIndexPath := ""
 	if activePath != "" {
-		searchIndexPath = catalogSearchIndexPath(searchIndexDir, selectedPath)
-		if _, err := os.Stat(searchIndexPath); os.IsNotExist(err) {
-			if err := catalog.BuildSearchIndex(selectedPath, searchIndexPath); err != nil {
-				_ = st.ClearActiveCatalog()
-				activePath = ""
-				selectedPath = dbPath
-				selectedName = "Configured catalog"
-				searchIndexPath = ""
-			}
-		} else if err != nil {
+		var indexErr error
+		searchIndexPath, indexErr = ensureCatalogSearchIndex(searchIndexDir, selectedPath)
+		if indexErr != nil {
 			_ = st.ClearActiveCatalog()
 			activePath = ""
 			selectedPath = dbPath
@@ -328,6 +323,7 @@ func (a *App) Router() http.Handler {
 	mux.HandleFunc("/api/torrents/", a.handleTorrentDetail)
 	mux.HandleFunc("/api/admin/login", a.handleAdminLogin)
 	mux.HandleFunc("/api/admin/logout", a.requireAdmin(a.handleAdminLogout))
+	mux.HandleFunc("/api/admin/state/reset", a.requireAdmin(a.handleAdminStateReset))
 	mux.HandleFunc("/api/admin/status", a.requireAdmin(a.handleAdminStatus))
 	mux.HandleFunc("/api/admin/audits", a.requireAdmin(a.handleAdminAudits))
 	mux.HandleFunc("/api/admin/audits/detail", a.requireAdmin(a.handleAdminAuditDetail))
@@ -1637,6 +1633,45 @@ func (a *App) applyDownloadStatus(item *state.ImportReference, status downloadSt
 	item.RecoveryError = status.RecoveryError
 }
 
+// adminResetConfirmation is the exact phrase an operator has to type to discard
+// every operational record. Requiring it rather than a single click keeps a
+// stray reload from wiping an afternoon of recovery work.
+const adminResetConfirmation = "RESET"
+
+// handleAdminStateReset empties the operational record tables so a recovery or
+// load run can be exercised from a clean slate. It deliberately leaves the
+// catalog database, the Tor configuration and the admin session alone, and it
+// records the reset in the audit log it just cleared.
+func (a *App) handleAdminStateReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := parseAdminForm(r); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(r.FormValue("confirm")) != adminResetConfirmation {
+		http.Error(w, "type "+adminResetConfirmation+" to confirm", http.StatusBadRequest)
+		return
+	}
+	counts, err := a.state.ResetOperationalRecords()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	parts := make([]string, 0, len(counts))
+	for _, table := range []string{"import_references", "import_manifests", "import_runs", "import_sources", "catalog_sources", "admin_audit"} {
+		parts = append(parts, fmt.Sprintf("%s=%d", table, counts[table]))
+	}
+	_ = a.state.Audit("admin_state_reset", strings.Join(parts, " "))
+	writeJSON(w, map[string]any{
+		"reset":     true,
+		"removed":   counts,
+		"preserved": []string{"catalog database", "tor settings", "admin session", "active catalog"},
+	})
+}
+
 func (a *App) handleAdminCatalogSources(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -2282,13 +2317,21 @@ func catalogSearchIndexPath(directory, catalogPath string) string {
 }
 
 func (a *App) ensureSearchIndex(catalogPath string) (string, error) {
-	indexPath := catalogSearchIndexPath(a.searchIndexDir, catalogPath)
-	if info, err := os.Stat(indexPath); err == nil {
-		if !info.IsDir() && info.Size() > 0 {
-			return indexPath, nil
-		}
-	} else if !os.IsNotExist(err) {
+	return ensureCatalogSearchIndex(a.searchIndexDir, catalogPath)
+}
+
+func ensureCatalogSearchIndex(directory, catalogPath string) (string, error) {
+	searchIndexBuildMu.Lock()
+	defer searchIndexBuildMu.Unlock()
+
+	indexPath := catalogSearchIndexPath(directory, catalogPath)
+	matches, err := catalog.SearchIndexMatches(catalogPath, indexPath)
+	if err != nil {
 		return "", err
+	}
+	if matches {
+		_ = os.Remove(indexPath + ".building")
+		return indexPath, nil
 	}
 	if err := catalog.BuildSearchIndex(catalogPath, indexPath); err != nil {
 		return "", err
