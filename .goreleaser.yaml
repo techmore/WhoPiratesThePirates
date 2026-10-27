@@ -46,7 +46,7 @@ brews:
     service: |
       run [opt_bin/"whop2p"]
       keep_alive true
-      working_dir Pathname(ENV["HOME"])
+      working_dir Dir.home
       log_path "~/Library/Logs/whop2p.log"
     test: |
       system "#{bin}/whop2p", "--version"
